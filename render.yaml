@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: litl-api
+    runtime: python
+    plan: free
+    rootDir: LITL-Backend
+    buildCommand: pip install --no-cache-dir -r requirements.txt
+    startCommand: python -m app.setup_db && uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --workers 1 --limit-concurrency 16 --no-proxy-headers
+    healthCheckPath: /readyz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.13
+      - key: APP_ENV
+        value: hosted
+      - key: AUTH_MODE
+        value: supabase
+      - key: STORAGE_MODE
+        value: supabase
+      - key: STORAGE_BUCKET
+        value: litl-private
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false

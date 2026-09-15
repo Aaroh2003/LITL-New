@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+.data/
+.test-data/
+*.db
+*.db-shm
+*.db-wal
+*.pem
+*.key
+certs/
+.DS_Store
