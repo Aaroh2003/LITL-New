@@ -53,7 +53,7 @@ export function AppTopNav({
         ))}
       </nav>
 
-      {session ? <><span className="max-w-40 truncate text-small">{session.user.email}</span><Button size="sm" variant="ghost" onClick={() => { if (!window.confirm('Sign out? Any unsaved review input will be discarded.')) return; setError(''); void signOut().catch((cause) => setError(errorMessage(cause))) }}>Sign out</Button></> : config?.auth_mode === 'supabase' ? <NavLink to="/login">Sign in</NavLink> : <span className="text-small text-slate">{initials || 'Limited beta'}</span>}
+      {session ? <><span className="max-w-40 truncate text-small">{session.user.email}</span><Button size="sm" variant="ghost" onClick={() => { if (!window.confirm('Sign out? Any unsaved review input will be discarded.')) return; setError(''); void signOut().catch((cause) => setError(errorMessage(cause))) }}>Sign out</Button></> : config?.auth_mode === 'supabase' ? <><NavLink to="/login">Sign in</NavLink><NavLink to="/signup">Sign up</NavLink></> : <span className="text-small text-slate">{initials || 'Limited beta'}</span>}
       {error && <p role="alert" className="text-red">{error}</p>}
     </header>
   )

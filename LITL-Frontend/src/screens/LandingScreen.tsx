@@ -5,6 +5,7 @@ import { Button, ButtonLink } from '@/components/ui/Button'
 import { Card, Overline } from '@/components/ui/Card'
 import { StatusPill, type VerificationStatus } from '@/components/ui/StatusPill'
 import { cn } from '@/lib/cn'
+import { useAuth } from '@/lib/auth'
 
 /** Landing — light mode only. First page of the product flow. */
 
@@ -150,6 +151,7 @@ function ReferenceCard() {
 }
 
 export function LandingScreen() {
+  const { config, session } = useAuth()
   return (
     <AppShell showNav={false} showBoundaryStrip={false} className="bg-cream">
       {/* ── Hero (light mode only) ───────────────────────────────────────── */}
@@ -171,6 +173,24 @@ export function LandingScreen() {
                 </a>
               ))}
             </nav>
+            {session ? (
+              <ButtonLink
+                to="/documents"
+                variant="secondary"
+                className="rounded-[10px] border-mist bg-white px-[18px] py-[10px] text-[14px] text-ink hover:bg-white"
+              >
+                Documents
+              </ButtonLink>
+            ) : config?.auth_mode === 'supabase' ? (
+              <div className="flex items-center gap-[14px]">
+                <Link to="/login" className="text-[14px] font-medium whitespace-nowrap text-slate transition-colors hover:text-ink">
+                  Sign in
+                </Link>
+                <Link to="/signup" className="text-[14px] font-medium whitespace-nowrap text-slate transition-colors hover:text-ink">
+                  Sign up
+                </Link>
+              </div>
+            ) : null}
             <ButtonLink
               to="/upload"
               variant="primary"

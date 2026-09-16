@@ -4,6 +4,7 @@ import { AuthProvider, ProtectedRoutes } from '@/lib/auth'
 import { DocumentRoutes } from '@/lib/documents'
 import LandingScreen from '@/screens/LandingScreen'
 import LoginScreen from '@/screens/LoginScreen'
+import SignupScreen from '@/screens/SignupScreen'
 import DocumentsScreen from '@/screens/DocumentsScreen'
 import UploadScreen from '@/screens/UploadScreen'
 import AnalyzingScreen from '@/screens/AnalyzingScreen'
@@ -20,6 +21,7 @@ export function App() {
     <Route path="/" element={<LandingScreen />} />
     <Route path="/help" element={<HelpScreen />} />
     <Route path="/login" element={<LoginScreen />} />
+    <Route path="/signup" element={<SignupScreen />} />
     <Route element={<ProtectedRoutes />}>
       <Route path="/documents" element={<DocumentsScreen />} />
       <Route path="/upload" element={<UploadScreen />} />

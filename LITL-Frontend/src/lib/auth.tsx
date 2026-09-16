@@ -96,6 +96,11 @@ export function ConfigGate({ children }: { children: ReactNode }) {
   if (loading || error) return <AppShell><div className="page narrow"><h1 className="type-h2">{loading ? 'Connecting to LiTL' : 'Connection / setup problem'}</h1><p role={error ? 'alert' : 'status'}>{error || 'Loading server configuration. Free hosting may take about a minute to wake up.'}</p>{error && <Button onClick={retry}>Retry connection</Button>}</div></AppShell>
   return children
 }
+export function postAuthPath(from: unknown) {
+  return typeof from === 'string' && from.startsWith('/') && !from.startsWith('//') && from !== '/login' && from !== '/signup'
+    ? from
+    : '/documents'
+}
 export function ProtectedRoutes() {
   const { config, session } = useAuth()
   const location = useLocation()

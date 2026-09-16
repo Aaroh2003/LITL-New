@@ -450,6 +450,52 @@ class BackendTests(unittest.TestCase):
         with patch("app.main.request_json", side_effect=RemoteError("unauthorized")):
             self.assertEqual(self.client.get("/v1/documents", headers={"Authorization": "Bearer fake.jwt"}).status_code, 401)
 
+    def test_signup_creates_confirmed_user_and_returns_session(self):
+        owner_id = uid()
+        self.settings.auth_mode = "supabase"
+        self.settings.supabase_url = "https://project.supabase.co"
+        self.settings.supabase_publishable_key = "anon-key"
+        self.settings.supabase_service_role_key = "service-key"
+        created = {"id": owner_id}
+        token = {"access_token": "access-token", "refresh_token": "refresh-token", "expires_in": 3600}
+
+        def remote(_client, method, url, **kwargs):
+            if url.endswith("/auth/v1/admin/users"):
+                self.assertEqual(method, "POST")
+                self.assertEqual(kwargs["headers"]["Authorization"], "Bearer service-key")
+                self.assertEqual(kwargs["json"]["email"], "tester@example.com")
+                self.assertTrue(kwargs["json"]["email_confirm"])
+                return created
+            if "/auth/v1/token" in url:
+                self.assertEqual(method, "POST")
+                self.assertEqual(kwargs["headers"]["Authorization"], "Bearer anon-key")
+                self.assertEqual(kwargs["json"]["password"], "secret12")
+                return token
+            raise AssertionError(url)
+
+        with patch("app.main.request_json", side_effect=remote):
+            response = self.client.post("/v1/signup", json={"email": "tester@example.com", "password": "secret12"})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["user_id"], owner_id)
+        self.assertEqual(body["session"]["access_token"], "access-token")
+        self.assertEqual(body["session"]["refresh_token"], "refresh-token")
+
+    def test_signup_rejects_local_mode_duplicates_and_invalid_input(self):
+        response = self.client.post("/v1/signup", json={"email": "tester@example.com", "password": "secret12"})
+        self.assertEqual(response.status_code, 409)
+        self.settings.auth_mode = "supabase"
+        self.settings.supabase_url = "https://project.supabase.co"
+        self.settings.supabase_publishable_key = "anon-key"
+        self.settings.supabase_service_role_key = "service-key"
+        self.assertEqual(self.client.post("/v1/signup", json={"email": "not-an-email", "password": "secret12"}).status_code, 422)
+        self.assertEqual(self.client.post("/v1/signup", json={"email": "tester@example.com", "password": "ab"}).status_code, 422)
+        duplicate = RemoteError("Remote service returned HTTP 422", status=422, payload={"msg": "User already registered"})
+        with patch("app.main.request_json", side_effect=duplicate):
+            response = self.client.post("/v1/signup", json={"email": "tester@example.com", "password": "secret12"})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("already exists", response.json()["detail"])
+
     def test_loopback_host_restriction(self):
         self.assertEqual(self.client.get("/v1/documents", headers={"Host": "evil.example"}).status_code, 403)
 

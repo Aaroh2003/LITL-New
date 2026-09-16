@@ -80,10 +80,42 @@ class SourceOpenInput(Input):
     source_id: str = Field(max_length=36)
 
 
+class SignupInput(Input):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=6, max_length=72)
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, value):
+        value = value.strip().lower()
+        if value.count("@") != 1 or " " in value:
+            raise ValueError("Enter a valid email address")
+        local, domain = value.split("@")
+        if not local or not domain or "." not in domain or domain.startswith(".") or domain.endswith("."):
+            raise ValueError("Enter a valid email address")
+        return value
+
+
+def supabase_headers(key):
+    return {"apikey": key, "Authorization": "Bearer " + key}
+
+
+def signup_conflict_message(exc: RemoteError):
+    payload = exc.payload or {}
+    text = " ".join(str(payload.get(key) or "") for key in ("msg", "error_description", "error", "error_code", "code")).lower()
+    if "already" in text or "exists" in text:
+        return "An account with this email already exists. Sign in instead."
+    if "password" in text:
+        return "Choose a stronger password with at least 6 characters."
+    if exc.status in {400, 422}:
+        return "Could not create the account with the details provided."
+    return None
+
+
 class RequestGuard:
     def __init__(self, app, settings):
         self.app, self.settings = app, settings
-        self.rates, self.lock = {}, threading.Lock()
+        self.rates, self.signups, self.lock = {}, {}, threading.Lock()
         self.active_uploads = 0
 
     async def __call__(self, scope, receive, send):
@@ -124,9 +156,12 @@ class RequestGuard:
                     return await JSONResponse({"detail": "Origin is not allowed for local mutations"}, status_code=403)(scope, receive, send)
         if scope["path"] not in {"/healthz", "/readyz"}:
             clock = time.monotonic()
+            signup = scope["path"] == "/v1/signup" and scope["method"] == "POST"
             with self.lock:
                 if len(self.rates) > 2048:
                     self.rates = {key: value for key, value in self.rates.items() if clock - value[0] < 60}
+                if len(self.signups) > 2048:
+                    self.signups = {key: value for key, value in self.signups.items() if clock - value[0] < 60}
                 start, count = self.rates.get(ip, (clock, 0))
                 if clock - start >= 60:
                     start, count = clock, 0
@@ -134,6 +169,13 @@ class RequestGuard:
                     count = 180
                 else:
                     self.rates[ip] = (start, count + 1)
+                if signup:
+                    signup_start, signup_count = self.signups.get(ip, (clock, 0))
+                    if clock - signup_start >= 60:
+                        signup_start, signup_count = clock, 0
+                    self.signups[ip] = (signup_start, signup_count + 1)
+                    if signup_count >= 8:
+                        count = 180
             if count >= 180:
                 return await JSONResponse({"detail": "Request rate limit reached; retry in a minute"}, status_code=429)(scope, receive, send)
         if scope["method"] in {"POST", "PUT", "PATCH"}:
@@ -239,6 +281,47 @@ def create_app(settings=None, client=None):
     @app.get("/v1/config")
     def config():
         return settings.public()
+
+    @app.post("/v1/signup")
+    def signup(body: SignupInput):
+        if settings.auth_mode != "supabase":
+            raise HTTPException(409, "Local mode has no accounts. Sign-in is not required.")
+        try:
+            created = request_json(
+                client, "POST", settings.supabase_url + "/auth/v1/admin/users", limit=65536,
+                headers=supabase_headers(settings.supabase_service_role_key),
+                json={"email": body.email, "password": body.password, "email_confirm": True},
+            )
+            user = created["user"] if isinstance(created.get("user"), dict) else created
+            user_id = str(UUID(user["id"]))
+        except (RemoteError, ValueError, KeyError, TypeError) as exc:
+            conflict = signup_conflict_message(exc) if isinstance(exc, RemoteError) else None
+            if conflict:
+                raise HTTPException(409 if "already exists" in conflict else 422, conflict) from exc
+            raise HTTPException(502, "Could not create the account. Retry shortly.") from exc
+        try:
+            token = request_json(
+                client, "POST", settings.supabase_url + "/auth/v1/token?grant_type=password", limit=65536,
+                headers=supabase_headers(settings.supabase_publishable_key),
+                json={"email": body.email, "password": body.password},
+            )
+            access, refresh = token["access_token"], token["refresh_token"]
+            if not isinstance(access, str) or not isinstance(refresh, str) or not access or not refresh:
+                raise KeyError("session")
+            return {
+                "user_id": user_id,
+                "session": {
+                    "access_token": access,
+                    "refresh_token": refresh,
+                    "expires_in": int(token.get("expires_in") or 3600),
+                    "token_type": "bearer",
+                },
+            }
+        except (RemoteError, ValueError, KeyError, TypeError) as exc:
+            text = " ".join(str((getattr(exc, "payload", None) or {}).get(key) or "") for key in ("msg", "error_description", "error")).lower() if isinstance(exc, RemoteError) else ""
+            if "confirm" in text:
+                return {"user_id": user_id, "session": None}
+            raise HTTPException(502, "Account was created. Sign in to continue.") from exc
 
     @app.post("/v1/documents/text")
     def create_text(body: TextInput, actor=Depends(owner)):
