@@ -21,11 +21,15 @@ const metricDescriptions: Record<keyof typeof metricNames, string> = {
   evidence_provenance: 'Checked references with complete source URLs, timestamps and locators / checked references.',
 }
 export function MetricCards({ metrics }: { metrics: Metrics }) {
+  const cards = (Object.keys(metricNames) as Array<keyof typeof metricNames>).filter((key) => {
+    const metric = metrics[key]
+    return metric.denominator > 0 && metric.percentage !== null
+  })
   return <div>
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Object.entries(metricNames).map(([key, title]) => {
-      const metric = metrics[key as keyof typeof metricNames]
-      return <Card key={key} className="p-4"><p className="text-small text-slate">{title}</p><p className="mt-2 font-display text-h2">{metric.denominator === 0 || metric.percentage === null ? 'N/A' : `${Math.round(metric.percentage * 10) / 10}%`}</p><p className="text-small">{metric.numerator} / {metric.denominator}</p><p className="mt-2 text-small text-slate">{metricDescriptions[key as keyof typeof metricNames]}</p></Card>
-    })}</div>
+    {cards.length > 0 && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{cards.map((key) => {
+      const metric = metrics[key]
+      return <Card key={key} className="p-4"><p className="text-small text-slate">{metricNames[key]}</p><p className="mt-2 font-display text-h2">{`${Math.round(metric.percentage! * 10) / 10}%`}</p><p className="text-small">{metric.numerator} / {metric.denominator}</p><p className="mt-2 text-small text-slate">{metricDescriptions[key]}</p></Card>
+    })}</div>}
     <p className="mt-3 text-small text-slate">Metrics cover detected references only, not all legal claims. Source-link activity records clicks, not reading. No metric is a legal-correctness grade.</p>
     <p className="mt-2 text-small">{metrics.total} detected · {metrics.unreviewed} unreviewed · {metrics.unresolved} unresolved · {metrics.ambiguous} ambiguous · {metrics.unavailable} unavailable</p>
     <p className="mt-2 text-small">{(['unsupported', 'not_found', 'not_checked', 'quote_mismatch'] as const).filter((key) => metrics[key] !== undefined).map((key) => `${metrics[key]} ${label(key)}`).join(' · ')}</p>

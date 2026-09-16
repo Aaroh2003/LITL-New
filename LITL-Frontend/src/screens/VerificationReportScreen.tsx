@@ -22,8 +22,7 @@ function Snapshot({ documentId, reportId }: { documentId: string; reportId: stri
     {error && <p role="alert" className="notice error">{error} <Button onClick={reload}>Retry</Button></p>}
     {!report && !error && <p role="status">Loading saved report…</p>}
     {report && <><header className="stack"><p className="type-overline text-gold-ink">LiTL · immutable review snapshot</p><h1 className="type-h2 break-words">{report.document.title}</h1><p>Saved {date(report.created_at)}</p><p className="text-small text-slate break-all">Report {report.id} · Analysis {report.document.latest_run?.id || 'not recorded'} · Document {report.document.id}</p></header>
-      <p className="notice">{report.disclaimer}</p><p className="text-small text-slate">Single-reviewer record. No overall legal-correctness grade, senior approval or modification of the original file. This snapshot reflects saved decisions only.</p>
-      {report.document.latest_run?.warnings.map((warning, index) => <p className="notice" key={index}>{warning}</p>)}
+      <p className="text-small text-slate">Single-reviewer record. No overall legal-correctness grade, senior approval or modification of the original file. This snapshot reflects saved decisions only.</p>
       <MetricCards metrics={report.document.metrics} />
       <h2 className="type-h3">References, evidence and saved decisions</h2>
       {!report.document.findings.length && <p className="notice">No references were detected. This does not establish that the document is legally correct or free of references.</p>}
