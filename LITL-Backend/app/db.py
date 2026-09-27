@@ -40,7 +40,7 @@ class Database:
                       RAISE EXCEPTION 'LiTL audit records and report snapshots are immutable';
                     END $$;
                 """))
-                for table in ("review_events", "report_snapshots"):
+                for table in ("review_events", "report_snapshots", "source_requests", "summary_review_events"):
                     conn.execute(text(f'DROP TRIGGER IF EXISTS immutable_update ON "{table}"'))
                     conn.execute(text(f"""
                         CREATE TRIGGER immutable_update BEFORE UPDATE ON "{table}"
@@ -49,7 +49,7 @@ class Database:
         else:
             with self.engine.begin() as conn:
                 Base.metadata.create_all(conn)
-                for table in ("review_events", "report_snapshots"):
+                for table in ("review_events", "report_snapshots", "source_requests", "summary_review_events"):
                     conn.execute(text(f"""
                         CREATE TRIGGER IF NOT EXISTS {table}_immutable BEFORE UPDATE ON {table}
                         BEGIN SELECT RAISE(ABORT, 'immutable record'); END

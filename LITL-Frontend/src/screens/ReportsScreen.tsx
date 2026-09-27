@@ -6,6 +6,7 @@ import { Card } from '@/components/ui/Card'
 import { useDocument, useResource } from '@/lib/documents'
 import { useAuth } from '@/lib/auth'
 import { date, errorMessage, type Report, type ReportSummary } from '@/lib/api'
+import { AiSummaryPanel } from '@/components/workspace/AiSummaryPanel'
 
 export default function ReportsScreen() {
   const { doc } = useDocument()
@@ -17,13 +18,18 @@ export default function ReportsScreen() {
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   async function snapshot() {
+    if (['queued', 'processing'].includes(doc.ai_summary?.status || '') &&
+        !window.confirm('The AI summary is still pending. Save an evidence-only report now? A new report will be needed to include the completed AI summary.')) return
     setBusy(true); setSaveError('')
     try {
       const report = await api<Report>(`/v1/documents/${doc.id}/reports`, { method: 'POST' })
       if (alive.current) navigate(`/documents/${doc.id}/reports/${report.id}`)
     } catch (cause) { if (alive.current) setSaveError(errorMessage(cause)) } finally { if (alive.current) setBusy(false) }
   }
-  return <AppShell><div className="page"><div className="row"><div><h1 className="type-h2">Saved report snapshots</h1><p className="text-slate break-words">{doc.title}</p></div><Button disabled={busy || doc.latest_run?.status !== 'completed'} onClick={() => void snapshot()}>{busy ? 'Saving snapshot…' : 'Save current report snapshot'}</Button><ButtonLink variant="secondary" to={`/documents/${doc.id}/review`}>Back to review</ButtonLink></div>
+  return <AppShell><div className="page"><div className="row"><div><h1 className="type-h2">Reports</h1><p className="text-slate break-words">{doc.title}</p></div><Button disabled={busy || doc.latest_run?.status !== 'completed'} onClick={() => void snapshot()}>{busy ? 'Generating report…' : 'Generate report'}</Button><ButtonLink variant="secondary" to={`/documents/${doc.id}/review`}>Back to review</ButtonLink></div>
+    <Card className="stack p-6"><h2 className="type-h3">Your evidence and review report</h2><p>Generate a saved report with a count-based overview, coverage formulas, reference links, supporting evidence, review decisions, API usage and the current AI summary if available. Download JSON or print/save PDF from the report.</p><p className="text-small text-slate">{doc.metrics.unreviewed} findings are unreviewed and {doc.metrics.unresolved} remain unresolved; these gaps stay visible. Evidence-only reports need no AI API. The report is not a legal opinion.</p></Card>
+    <AiSummaryPanel />
+    <h2 className="type-h3">Saved report snapshots</h2>
     <p className="notice">Each saved report is an immutable snapshot of the analysis, evidence and saved human decisions at that time. Later reviews do not update earlier reports. Unsaved edits are not included. Reports expire with the document and are deleted with it. No public sharing or senior approval is enabled.</p>
     {doc.latest_run?.status !== 'completed' && <p className="notice">Complete the latest analysis before saving a new report. Previously saved snapshots remain available below.</p>}
     {(error || saveError) && <p role="alert" className="notice error">{error || saveError}</p>}

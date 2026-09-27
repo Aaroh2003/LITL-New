@@ -29,7 +29,8 @@ export function useResource<T>(path: string, poll?: (value: T) => boolean) {
   }, [api, path, revision, poll, reload])
   return { data, setData, error, reload }
 }
-const active = (doc: Document) => ['queued', 'processing'].includes(doc.latest_run?.status || '')
+const active = (doc: Document) => ['queued', 'processing'].includes(doc.latest_run?.status || '') ||
+  ['queued', 'processing'].includes(doc.ai_summary?.status || '')
 type DocumentState = { doc: Document; reload: () => void; updateFinding: (finding: Finding) => void; updateRun: (run: Run) => void }
 const DocumentContext = createContext<DocumentState | null>(null)
 function DocumentLoader({ documentId }: { documentId: string }) {

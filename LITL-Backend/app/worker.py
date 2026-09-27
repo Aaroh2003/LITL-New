@@ -2,12 +2,15 @@ import logging
 import threading
 import time
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 
-from .extraction import ExtractionError, detect, extract_bounded
-from .models import DocumentRow, FindingRow, RunRow, SourceRow, now, uid
+from .budget import reserve_source_request
+from .config import MAX_SOURCE_REQUESTS
+from .extraction import ExtractionError, detect_with_scope, extract_bounded, statutory_details
+from .models import DocumentRow, FindingRow, RunRow, RunScopeRow, SourceRequestRow, SourceRow, now, uid
 from .network import RemoteError
-from .sources import IndianKanoon
+from .sources import IndianKanoon, MAX_REFERENCE_QUERIES, link_details
+from .summary import Summaries
 
 
 log = logging.getLogger("litl.worker")
@@ -23,6 +26,7 @@ class Worker:
         self.stop_event = threading.Event()
         self.thread = None
         self.last_cleanup = 0
+        self.summaries = Summaries(db, settings, service)
 
     def start(self):
         self.thread = threading.Thread(target=self.loop, name="litl-durable-worker", daemon=True)
@@ -39,7 +43,10 @@ class Worker:
                 if time.monotonic() - self.last_cleanup > 60:
                     self.service.cleanup()
                     self.last_cleanup = time.monotonic()
-                if not self.tick():
+                worked = self.tick()
+                if not self.stop_event.is_set():
+                    worked = self.summaries.tick(self.client) or worked
+                if not worked:
                     self.stop_event.wait(0.75)
             except Exception as exc:
                 log.error("Worker loop failure (%s); retrying without logging private data", type(exc).__name__)
@@ -81,16 +88,22 @@ class Worker:
             raise JobLost()
         return document, run
 
-    def heartbeat(self, job, stage=None, reserve=False):
+    def heartbeat(self, job, stage=None, reserve=None):
         if self.stop_event.is_set():
             raise JobLost()
         with self.db.transaction() as session:
-            _, run = self.locked_job(session, *job)
+            document, run = self.locked_job(session, *job)
             run.lease_until = now() + self.settings.lease_seconds
             if stage:
                 run.stage = stage
             if reserve:
-                if run.source_requests >= 50:
+                if run.source_requests >= MAX_SOURCE_REQUESTS:
+                    return False
+                if reserve == "search" and session.scalar(select(func.count()).select_from(SourceRequestRow).where(
+                    SourceRequestRow.run_id == run.id, SourceRequestRow.operation == "search",
+                )) >= MAX_REFERENCE_QUERIES:
+                    return False
+                if not reserve_source_request(session, self.settings, run, document.owner_id, reserve):
                     return False
                 run.source_requests += 1
             return True
@@ -139,20 +152,29 @@ class Worker:
             extraction_warnings = extracted.get("warnings", [])
         del raw
         self.heartbeat(job, "detecting")
-        findings, warnings = detect(text, paragraphs)
-        connector = IndianKanoon(self.settings, self.client, lambda: self.heartbeat(job, reserve=True))
+        findings, warnings, scope = detect_with_scope(text, paragraphs)
+        connector = IndianKanoon(self.settings, self.client, lambda operation: self.heartbeat(job, reserve=operation))
         self.heartbeat(job, "looking_up_sources")
         for finding in findings:
             self.heartbeat(job)
             if finding["kind"] == "case_citation":
                 status, note, sources, checked = connector.resolve(finding)
                 finding.update(status=status, note=note, sources=sources, identity_checked=checked)
-            elif finding["kind"] == "statutory_reference":
-                finding.update(
-                    status="unsupported", sources=[],
-                    note="Statute identifiers detected only. No authoritative version/applicability connector is configured; "
-                         "CrPC/BNSS, amendment dates and applicable law require human checking.",
+                finding.update(link_details(status, sources))
+                finding["identity_assessment"] = (
+                    "matched" if checked and status == "source_found" else "not_matched" if checked else "unknown"
                 )
+            elif finding["kind"] == "statutory_reference":
+                status, note, sources, _ = connector.resolve(finding)
+                details = statutory_details(finding["label"])
+                finding.update(
+                    status="unsupported", sources=sources, **details,
+                )
+                finding.update(link_details(status, sources))
+                if details["statute"]["act"]:
+                    finding["note"] = note
+                if status == "source_found" and sources[0].get("target_kind") == "statute_act":
+                    finding["link_message"] = "Open Act - section-specific link unavailable"
             else:
                 finding["sources"] = []
         for finding in findings:
@@ -164,10 +186,13 @@ class Worker:
                 citation = max(candidates, key=lambda f: f["end"], default=None)
                 status, note, sources, checked = connector.check_quote(finding, citation)
                 finding.update(status=status, note=note, sources=sources, quote_checked=checked)
+                finding.update(link_details(status, sources))
         self.heartbeat(job, "publishing")
         with self.db.transaction() as session:
             document, run = self.locked_job(session, run_id, document_id, token)
             document.text, document.paragraphs = text, paragraphs
+            session.add(RunScopeRow(run_id=run_id, data=scope))
+            run.parser_version = scope["detector_version"]
             for item in findings:
                 sources = item.pop("sources")
                 finding = FindingRow(run_id=run_id, data=item)
@@ -179,3 +204,4 @@ class Worker:
             )))
             run.status, run.stage, run.finished_at = "completed", "completed", now()
             run.lease_token, run.lease_until = None, None
+            self.summaries.enqueue_auto(session, document, run)

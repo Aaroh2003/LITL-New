@@ -64,6 +64,17 @@ Configure these values through Render's dashboard/Blueprint prompt:
 | `CORS_ORIGINS` | Exact frontend origins, comma-separated; no wildcard |
 | `INDIAN_KANOON_API_TOKEN` | Optional server-only token once authorized API access is obtained |
 | `INDIAN_KANOON_TERMS_ACCEPTED` | `true` only after reviewing the provider's terms; defaults to `false` |
+| `INDIAN_KANOON_BUDGET_PAISE` | Approved cumulative allocation in paise; defaults to `0` (disabled); `40000` is INR 400 |
+| `INDIAN_KANOON_RUN_BUDGET_PAISE` | Per-analysis limit including recovery; defaults to `1100` (INR 11) |
+| `INDIAN_KANOON_DAILY_BUDGET_PAISE` | Shared UTC-day limit; defaults to `4400` (INR 44) |
+| `INDIAN_KANOON_OWNER_DAILY_BUDGET_PAISE` | Per-owner UTC-day limit; defaults to `2200` (INR 22) |
+| `GEMINI_API_KEY` | Optional server-only Google Gemini API key |
+| `GEMINI_ENABLED` | `true` only after data-use and account review; defaults to `false` |
+| `GEMINI_MODEL` | Defaults to `gemini-3.5-flash-lite`; also supports `gemini-3.8-flash` and legacy `gemini-2.5-flash`; no silent model substitution |
+| `GEMINI_BUDGET_MICROUSD` | Cumulative estimated Gemini allowance; defaults to `0` (disabled); `1000000` is USD 1 |
+| `GEMINI_OWNER_DAILY_REQUESTS` | Per-user attempts per UTC day; default `5`, configurable `1`–`20`; app-wide cap stays `20` |
+| `GEMINI_INPUT_MICROUSD_PER_MILLION` | Model-specific estimate; 3.5 Flash-Lite default `300000` (USD 0.30/million) |
+| `GEMINI_OUTPUT_MICROUSD_PER_MILLION` | Model-specific estimate; 3.5 Flash-Lite default `2500000` (USD 2.50/million) |
 
 In Render's **Secret Files**, upload the Supabase database CA as
 `supabase-ca.cer`; Render makes it available at `/etc/secrets/supabase-ca.cer`.
@@ -77,8 +88,24 @@ starting Uvicorn. It is not a general-purpose migration system for later schema
 changes. Use one process; the Blueprint supplies the required concurrency bound.
 
 The Blueprint omits the optional provider variables, so source lookup defaults
-to disabled. To enable it later, set both provider variables above in the Render
+to disabled. To enable it later, set the token, terms flag and positive allocation above in the Render
 environment and restart the service.
+
+Gemini is independently optional and requires its key, enabled flag, positive
+budget and per-document consent. Confirm the model's current prices, account
+tier, data-use/region rules and IK excerpt-use permissions first. AI generation
+uses durable jobs and may pause on free hosting. Additive summary tables receive
+the same private RLS/grant hardening as other backend tables. No frontend key,
+public summary sharing or automatic purchase is introduced.
+
+Requests reserve 50 paise/search and 20 paise/document (schedule
+`ik-2026-09-25`); confirm current prices before activation. Reservations survive
+failures/restarts, and aggregate spending survives deletion. This is not a
+provider balance sync. Reconcile outside account usage manually, and allocate
+only from verified remaining credit at upgrade; prior requests have no
+account-wide price ledger. Separate databases need separately partitioned
+allocations. New accounting tables receive existing RLS/grant hardening;
+existing columns, saved reports and previously recorded counters are unchanged.
 
 **Never deploy the local, unauthenticated development mode.** Hosted deployment
 must reject a missing Supabase configuration instead of silently falling back

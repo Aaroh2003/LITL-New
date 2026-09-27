@@ -180,6 +180,62 @@ Read the provider's documentation and terms, obtain API credentials and place
 them in **backend-only** environment configuration. Do not send credentials in
 chat or put them in any `VITE_` variable.
 
+For local use, enter your key in `LITL-Backend/.env` as
+`INDIAN_KANOON_API_TOKEN=...`. After reviewing the terms, set
+`INDIAN_KANOON_TERMS_ACCEPTED=true` and an approved
+`INDIAN_KANOON_BUDGET_PAISE` allocation. Units are integer paise: `40000` means
+INR 400, an example only. The default is zero, preventing live spending.
+From `LITL-Backend`, start:
+
+```sh
+.venv/bin/uvicorn app.main:app --env-file .env --host 127.0.0.1 --port 8000 --workers 1 --limit-concurrency 16
+```
+
+Restart after editing the file. Exported variables override it. See the
+[backend spending limits](LITL-Backend/README.md#spending-limits-and-report-costs).
+Reports include reserved request costs, not confirmed billing or account balance.
+Reopening/exporting reports does not make paid source requests. Optional Gemini
+summaries require a separate backend key, budget and explicit document consent;
+evidence-only reports do not require an AI provider.
+
+From the analysis or review screen, choose **Generate report**, then generate
+a saved snapshot. The final report includes a count-based overview, items needing
+attention, versioned formulas with numerators/denominators, source passages,
+saved decisions and JSON/PDF export. Coverage and match rates are separate;
+zero-denominator metrics show N/A, not a legal-correctness score.
+Statutory messages use the detected provision and explicitly named Act. A bare
+`Section 335` asks the reviewer to identify its Act instead of assuming CrPC/BNSS.
+Older saved reports are never rewritten; generate a new snapshot to include
+the current explanations and formulas.
+
+## Optional Gemini summaries and clickable references
+
+In `LITL-Backend/.env`, set `GEMINI_API_KEY`, `GEMINI_ENABLED=true` and a positive
+`GEMINI_BUDGET_MICROUSD` (for example `1000000` is a USD 1 estimated cumulative
+allowance). The default model is `gemini-3.5-flash-lite`; `gemini-3.8-flash` is
+also supported, while `gemini-2.5-flash` is retained
+only for projects that still have access. Defaults leave generation
+disabled. Restart the backend after editing. See
+[Gemini setup and safeguards](LITL-Backend/README.md#gemini-summary-setup).
+
+Opt in during upload for a summary after analysis, or choose **Generate AI
+summary** on an existing document's summary/reports page. Review its evidence
+references, mark it reviewed or rejected, and generate a new report to include
+that summary version. Unpaid Gemini may use prompts/responses to improve Google
+products; never send sensitive, confidential or personal data.
+
+Matched citations and named legislation targets open Indian Kanoon directly.
+Dotted references open the review panel, where possible matches or simple
+missing-source messages are shown. Bare sections require an Act name. A source
+link is not proof of legal applicability; AI does not invent URLs or alter
+the mathematical verification results.
+
+Each case/statute panel and report also offers **Open first Google result
+(unverified)**, using Google's first-result redirect for Indian Kanoon pages.
+Google may show a redirect confirmation or search page rather than navigating
+directly. Clicking sends only that reference; it makes no Gemini Search API
+call and does not import the result as verified evidence.
+
 The provider's [published pricing](https://api.indiankanoon.org/pricing/) currently
 advertises Rs 500 development/testing signup credit. Account approval, actual
 credit availability and any later top-up are the provider's responsibility.
@@ -222,7 +278,8 @@ junior/senior collaboration are intentionally deferred.
    with a tester account before trying a synthetic upload.
 6. If external source lookup is needed, obtain your own Indian Kanoon token and
    configure `INDIAN_KANOON_API_TOKEN` plus
-   `INDIAN_KANOON_TERMS_ACCEPTED=true` on the **backend only**. Source lookup is
+   `INDIAN_KANOON_TERMS_ACCEPTED=true` and a positive
+   `INDIAN_KANOON_BUDGET_PAISE` allocation on the **backend only**. Source lookup is
    otherwise explicitly unavailable; no fake evidence or paid LLM is substituted.
 
 Deploy only into accounts you own and have permission to use. These hosting
@@ -251,7 +308,7 @@ environment variables needed to make the application publicly reachable.
 | Requests fail with CORS errors | `CORS_ORIGINS` must exactly match the browser's frontend origin; restart the API |
 | API refuses to start | Hosted auth/storage/DB settings, CA secret file and private bucket must all be configured; local fallback is intentionally forbidden |
 | Initial request is slow | Render Free can take about a minute to wake; check `/readyz` |
-| Sources show unavailable | Configure the provider token and terms flag; also check API credit/access |
+| Sources show unavailable | Configure the backend token, terms flag and positive allocation; check unspent app limits and provider credit/access |
 | Refreshing a document URL gives 404 | Use the supplied frontend `vercel.json` SPA rewrite and correct Vercel project root |
 
 ## Local workflow checks

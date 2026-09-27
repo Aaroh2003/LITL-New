@@ -1,4 +1,4 @@
-import type { Metrics } from '@/lib/api'
+import type { AnalysisScope, AssessmentMetrics, Metrics } from '@/lib/api'
 import { label } from '@/lib/api'
 import { Card } from './Card'
 
@@ -20,15 +20,38 @@ const metricDescriptions: Record<keyof typeof metricNames, string> = {
   source_activity: 'Distinct source URLs with a recorded open action / distinct linked source URLs.',
   evidence_provenance: 'Checked references with complete source URLs, timestamps and locators / checked references.',
 }
-export function MetricCards({ metrics }: { metrics: Metrics }) {
+function AssessmentCards({ assessment, scope, showAll }: { assessment: AssessmentMetrics; scope?: AnalysisScope | null; showAll: boolean }) {
+  const counts = assessment.counts
+  const cards = Object.entries(assessment.metrics).filter(([, metric]) => showAll || metric.denominator > 0)
+  return <div className="stack">
+    <div>
+      <h2 className="type-h3">Evidence and review calculations</h2>
+      <p className="text-small text-slate">Formula version: {assessment.definition_version}. Percentages = 100 × numerator / denominator; no denominator means N/A, not zero or full verification.</p>
+    </div>
+    <p className="text-small">{counts.processed} processed findings: {counts.case_citations} case citations ({counts.distinct_case_labels} distinct labels), {counts.quotations} quotations, {counts.statutory_references} statutory references.</p>
+    {scope ? <p className="notice">{scope.detected} detected before the processing limit · {scope.processed} processed · {scope.deferred} deferred. Selection: {scope.selection}; limit {scope.processing_limit}. Undetected references are not measured.</p> : <p className="notice">The pre-limit detection count was not recorded for this older analysis. Metrics cover processed findings only; run a new analysis to record detection and deferral counts.</p>}
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{cards.map(([key, metric]) => <Card key={key} className="stack break-inside-avoid p-4">
+      <h3 className="text-small text-slate">{metric.label}</h3>
+      <p className="font-display text-h2">{metric.denominator === 0 || metric.percentage === null ? 'N/A' : `${metric.percentage}%`}</p>
+      <p className="text-small">{metric.numerator} / {metric.denominator}</p>
+      <p className="text-small"><code>100 × ({metric.formula})</code></p>
+      <p className="text-small text-slate">{metric.description}</p>
+    </Card>)}</div>
+    <p className="text-small">{counts.unreviewed} unreviewed · {counts.unresolved} unresolved · {counts.case_citations - counts.assessed_identities} inconclusive case assessments · {counts.quotations - counts.compared_quotes} quotations not compared.</p>
+    <p className="text-small text-slate">Statutes are detected but not independently verified. Metrics are exact counts of these processed findings, not sample-based accuracy estimates, confidence intervals, or a combined legal-correctness score. Source-link activity records clicks, not reading.</p>
+  </div>
+}
+
+export function MetricCards({ metrics, scope, showAll = false }: { metrics: Metrics; scope?: AnalysisScope | null; showAll?: boolean }) {
+  if (metrics.assessment) return <AssessmentCards assessment={metrics.assessment} scope={scope} showAll={showAll} />
   const cards = (Object.keys(metricNames) as Array<keyof typeof metricNames>).filter((key) => {
     const metric = metrics[key]
-    return metric.denominator > 0 && metric.percentage !== null
+    return showAll || (metric.denominator > 0 && metric.percentage !== null)
   })
   return <div>
     {cards.length > 0 && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{cards.map((key) => {
       const metric = metrics[key]
-      return <Card key={key} className="p-4"><p className="text-small text-slate">{metricNames[key]}</p><p className="mt-2 font-display text-h2">{`${Math.round(metric.percentage! * 10) / 10}%`}</p><p className="text-small">{metric.numerator} / {metric.denominator}</p><p className="mt-2 text-small text-slate">{metricDescriptions[key]}</p></Card>
+      return <Card key={key} className="p-4"><p className="text-small text-slate">{metricNames[key]}</p><p className="mt-2 font-display text-h2">{metric.denominator === 0 || metric.percentage === null ? 'N/A' : `${metric.percentage}%`}</p><p className="text-small">{metric.numerator} / {metric.denominator}</p><p className="mt-2 text-small text-slate">{metricDescriptions[key]}</p></Card>
     })}</div>}
     <p className="mt-3 text-small text-slate">Metrics cover detected references only, not all legal claims. Source-link activity records clicks, not reading. No metric is a legal-correctness grade.</p>
     <p className="mt-2 text-small">{metrics.total} detected · {metrics.unreviewed} unreviewed · {metrics.unresolved} unresolved · {metrics.ambiguous} ambiguous · {metrics.unavailable} unavailable</p>

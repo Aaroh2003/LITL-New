@@ -6,3 +6,4 @@ httpx==0.28.1
 pypdf==6.18.1
 python-multipart==0.0.32
 defusedxml==0.7.1
+python-dotenv==1.2.3

@@ -41,6 +41,7 @@ class TextInput(Input):
     title: str = Field(min_length=1, max_length=200)
     text: str = Field(min_length=1, max_length=MAX_CHARACTERS)
     consent: Literal[True]
+    ai_summary_consent: bool = Field(default=False, strict=True)
 
     @field_validator("consent", mode="before")
     @classmethod
@@ -54,6 +55,7 @@ class UploadInput(Input):
     file_name: str = Field(min_length=1, max_length=255)
     size: int = Field(gt=0, le=MAX_FILE_BYTES, strict=True)
     consent: Literal[True]
+    ai_summary_consent: bool = Field(default=False, strict=True)
 
     @field_validator("consent", mode="before")
     @classmethod
@@ -78,6 +80,23 @@ class ReviewInput(Input):
 
 class SourceOpenInput(Input):
     source_id: str = Field(max_length=36)
+
+
+class SummaryInput(Input):
+    consent: Literal[True]
+    request_key: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+
+    @field_validator("consent", mode="before")
+    @classmethod
+    def explicit_consent(cls, value):
+        if value is not True:
+            raise ValueError("Gemini consent must be the JSON boolean true")
+        return value
+
+
+class SummaryReviewInput(Input):
+    decision: Literal["reviewed", "rejected"]
+    expected_version: int = Field(ge=0, strict=True)
 
 
 class SignupInput(Input):
@@ -327,18 +346,22 @@ def create_app(settings=None, client=None):
     def create_text(body: TextInput, actor=Depends(owner)):
         if not body.title.strip():
             raise HTTPException(422, "Title cannot be blank")
-        return service.create(actor, body.title.strip(), "pasted-text.txt", text=body.text)
+        return service.create(actor, body.title.strip(), "pasted-text.txt", text=body.text, ai_summary_consent=body.ai_summary_consent)
 
     @app.post("/v1/documents/file")
     async def create_file(request: Request, actor=Depends(owner)):
         if settings.storage_mode != "local":
             raise HTTPException(409, "Use the signed private-storage upload flow")
-        async with request.form(max_files=1, max_fields=1, max_part_size=MAX_BODY) as form:
+        async with request.form(max_files=1, max_fields=2, max_part_size=MAX_BODY) as form:
             file = form.get("file")
             if form.get("consent") != "true":
                 raise HTTPException(422, "Explicit anonymized-data and external-query consent is required")
-            if not isinstance(file, UploadFile) or len(form.multi_items()) != 2:
-                raise HTTPException(422, "Supply exactly one file and consent")
+            ai_consent = form.get("ai_summary_consent", "false")
+            if ai_consent not in {"true", "false"}:
+                raise HTTPException(422, "AI summary consent must be true or false")
+            if (not isinstance(file, UploadFile) or set(form) - {"file", "consent", "ai_summary_consent"}
+                    or len(form.multi_items()) != len(form)):
+                raise HTTPException(422, "Supply exactly one file, consent and optional AI summary consent")
             name = Path((file.filename or "").replace("\\", "/")).name
             if not name or len(name) > 255:
                 raise HTTPException(422, "Invalid filename")
@@ -348,7 +371,7 @@ def create_app(settings=None, client=None):
                 if len(data) > MAX_FILE_BYTES:
                     raise HTTPException(413, "File exceeds 10 MB")
             file_kind(name, bytes(data))
-            return await asyncio.to_thread(service.create, actor, name[:200], name, data=bytes(data))
+            return await asyncio.to_thread(service.create, actor, name[:200], name, data=bytes(data), ai_summary_consent=ai_consent == "true")
 
     @app.post("/v1/uploads")
     def upload(body: UploadInput, actor=Depends(owner)):
@@ -356,7 +379,7 @@ def create_app(settings=None, client=None):
             raise HTTPException(409, "Local mode uses the multipart file endpoint")
         name = Path(body.file_name.replace("\\", "/")).name
         file_kind(name)
-        return service.create(actor, name[:200], name, size=body.size, hosted=True)
+        return service.create(actor, name[:200], name, size=body.size, hosted=True, ai_summary_consent=body.ai_summary_consent)
 
     @app.post("/v1/documents/{document_id}/finalize")
     def finalize(document_id: str, actor=Depends(owner)):
@@ -390,7 +413,7 @@ def create_app(settings=None, client=None):
             run = session.scalar(select(RunRow).where(RunRow.id == run_id, RunRow.document_id == document_id))
             if not run:
                 raise HTTPException(404, "Analysis not found")
-            return run_json(run)
+            return run_json(run, session)
 
     @app.post("/v1/documents/{document_id}/analyses/{run_id}/cancel")
     def cancel(document_id: str, run_id: str, actor=Depends(owner)):
@@ -413,6 +436,18 @@ def create_app(settings=None, client=None):
     @app.post("/v1/documents/{document_id}/reports")
     def report(document_id: str, actor=Depends(owner)):
         return service.report(actor, document_id)
+
+    @app.post("/v1/documents/{document_id}/analyses/{run_id}/summaries")
+    def create_summary(document_id: str, run_id: str, body: SummaryInput, actor=Depends(owner)):
+        return worker.summaries.create(actor, document_id, run_id, body.request_key)
+
+    @app.get("/v1/documents/{document_id}/analyses/{run_id}/summaries/{summary_id}")
+    def get_summary(document_id: str, run_id: str, summary_id: str, actor=Depends(owner)):
+        return worker.summaries.get(actor, document_id, run_id, summary_id)
+
+    @app.put("/v1/documents/{document_id}/analyses/{run_id}/summaries/{summary_id}/review")
+    def review_summary(document_id: str, run_id: str, summary_id: str, body: SummaryReviewInput, actor=Depends(owner)):
+        return worker.summaries.review(actor, document_id, run_id, summary_id, body.decision, body.expected_version)
 
     @app.get("/v1/documents/{document_id}/reports")
     def reports(document_id: str, actor=Depends(owner)):

@@ -1,3 +1,4 @@
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -6,9 +7,10 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from .extraction import file_kind, paragraphs_for, validate_text
-from .metrics import metrics
-from .models import DocumentRow, FindingRow, OwnerQuota, ReportRow, ReviewEvent, RunRow, SourceOpen, now, uid
+from .budget import source_usage
+from .extraction import file_kind, paragraphs_for, statutory_details, validate_text
+from .metrics import metrics, report_overview
+from .models import DocumentRow, FindingRow, OwnerQuota, ReportRow, ReviewEvent, RunRow, RunScopeRow, SourceOpen, SummaryConsentRow, SummaryJobRow, now, uid
 from .network import RemoteError
 
 
@@ -24,20 +26,59 @@ def iso(timestamp):
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat() if timestamp is not None else None
 
 
-def run_json(run):
+def summary_json(job):
+    if job is None:
+        return None
+    packet = job.input_packet or {}
+    ids = {key for statements in (job.output or {}).values() for statement in statements for key in statement["evidence_ids"]}
+    evidence = {
+        key: {**value, "text": value["text"][:1600], "truncated": len(value["text"]) > 1600}
+        for key, value in packet.get("evidence", {}).items() if key in ids
+    }
+    return {
+        "id": job.id, "run_id": job.run_id, "status": job.status, "error": job.error,
+        "created_at": iso(job.created_at), "finished_at": iso(job.finished_at), "consent_at": iso(job.consent_at),
+        "model": job.model, "prompt_version": job.prompt_version, "input_sha256": job.input_sha256,
+        "output": job.output, "evidence": evidence, "limitations": packet.get("limitations", []),
+        "usage": job.usage, "reserved_microusd": job.reserved_microusd,
+        "review_state": job.review_state, "review_version": job.review_version,
+    }
+
+
+def latest_summary(session, run_id):
+    return session.scalar(select(SummaryJobRow).where(SummaryJobRow.run_id == run_id).order_by(
+        SummaryJobRow.created_at.desc(), SummaryJobRow.id.desc(),
+    ).limit(1))
+
+
+def run_json(run, session):
     if run is None:
         return None
     return {
         "id": run.id, "document_id": run.document_id, "status": run.status, "stage": run.stage,
         "error": run.error, "created_at": iso(run.created_at), "finished_at": iso(run.finished_at),
         "warnings": run.warnings,
+        "source_usage": source_usage(session, run),
     }
 
 
 def finding_json(session, finding):
     opened = list(session.scalars(select(SourceOpen.source_id).where(SourceOpen.finding_id == finding.id)))
+    details = {}
+    if "link_state" in finding.data:
+        details["evidence_message"] = finding.data.get("link_message", "")
+    elif finding.data["kind"] == "statutory_reference" and finding.data["status"] == "unsupported":
+        details = statutory_details(finding.data["label"])
+    else:
+        messages = {
+            "not_found": "This search returned no candidate judgment. Check the citation details or another repository; absence here is not proof of invalidity.",
+            "unavailable": "No usable judgment was retrieved for this reference. The lookup limitation above must be resolved before source comparison.",
+            "not_checked": "No source passage is available for comparison. Resolve the attributed case before checking this quotation's wording.",
+            "unsupported": "This reference could not be submitted for source lookup. Review the limitation above and check the original source manually.",
+        }
+        details["evidence_message"] = messages.get(finding.data["status"], "No source passage was retained for this finding. Inspect the source and analysis limitations before drawing a conclusion.")
     return {
-        **finding.data, "id": finding.id, "run_id": finding.run_id,
+        **finding.data, **details, "id": finding.id, "run_id": finding.run_id,
         "sources": [{"id": s.id, **s.data} for s in finding.sources],
         "decision": finding.decision, "review_note": finding.review_note, "correction": finding.correction,
         "version": finding.version, "source_opened": bool(opened), "opened_source_ids": opened,
@@ -52,7 +93,7 @@ def document_json(session, document, summary=False):
     run = latest_run(session, document.id)
     result = {
         "id": document.id, "file_name": document.file_name, "title": document.title,
-        "created_at": iso(document.created_at), "expires_at": iso(document.expires_at), "latest_run": run_json(run),
+        "created_at": iso(document.created_at), "expires_at": iso(document.expires_at), "latest_run": run_json(run, session),
     }
     if not summary:
         findings = [] if not run else [
@@ -61,7 +102,13 @@ def document_json(session, document, summary=False):
             )
         ]
         findings.sort(key=lambda f: (f["start"], f["end"]))
-        result.update(text=document.text, paragraphs=document.paragraphs, findings=findings, metrics=metrics(findings))
+        scope = session.get(RunScopeRow, run.id) if run else None
+        result.update(
+            text=document.text, paragraphs=document.paragraphs, findings=findings, metrics=metrics(findings),
+            analysis_scope=scope.data if scope else None,
+            ai_summary=summary_json(latest_summary(session, run.id)) if run else None,
+            ai_summary_requested=session.get(SummaryConsentRow, document.id) is not None,
+        )
     return result
 
 
@@ -103,15 +150,23 @@ class Service:
         if quota.analyses >= self.settings.daily_analyses:
             raise HTTPException(429, "Daily analysis quota reached")
         quota.analyses += 1
+        session.execute(update(SummaryJobRow).where(
+            SummaryJobRow.run_id.in_([r.id for r in runs]), SummaryJobRow.status.in_(["queued", "processing"]),
+        ).values(status="cancelled", error="A newer analysis was requested.", finished_at=now(), lease_token=None, lease_until=None))
         run = RunRow(document_id=document.id, status="queued", stage="queued", created_at=now(), warnings=[
             "Free hosted processing can pause while the API sleeps; requests wake the durable job loop.",
             "Maximum 50 detected references and 50 external source requests per analysis (including recovery).",
+            "Source lookup examines at most ten distinct case/statute queries and three candidates per query. AI summaries require separate consent and Gemini quota.",
+            "Source requests also stop at configured account, daily, owner and analysis spending limits. "
+            "Reserved costs include failed or uncertain requests and are not reconciled provider charges.",
         ])
         session.add(run)
         session.flush()
         return run
 
-    def create(self, owner, title, file_name, *, text=None, data=None, size=0, hosted=False):
+    def create(self, owner, title, file_name, *, text=None, data=None, size=0, hosted=False, ai_summary_consent=False):
+        if ai_summary_consent and not self.settings.ai_summary_configured:
+            raise HTTPException(503, "Gemini summary is not enabled with a key and positive budget; upload without AI or configure it first")
         with self.db.transaction() as session:
             quota = self.quota(session, owner)
             count = session.scalar(select(func.count()).select_from(DocumentRow).where(
@@ -134,6 +189,9 @@ class Service:
                 document.text, document.paragraphs = extracted["text"], extracted["paragraphs"]
             session.add(document)
             session.flush()
+            if ai_summary_consent:
+                session.add(SummaryConsentRow(document_id=document_id, accepted_at=timestamp))
+                session.flush()
             if not hosted:
                 self.new_run(session, document, quota)
             result = document_json(session, document)
@@ -176,7 +234,7 @@ class Service:
         with self.db.transaction() as session:
             quota = self.quota(session, owner)
             document = self.owner_document(session, owner, document_id, lock=True)
-            return run_json(self.new_run(session, document, quota))
+            return run_json(self.new_run(session, document, quota), session)
 
     def cancel(self, owner, document_id, run_id):
         with self.db.transaction() as session:
@@ -187,7 +245,7 @@ class Service:
             if run.status in {"queued", "processing"}:
                 run.status, run.stage, run.finished_at = "cancelled", "cancelled", now()
                 run.lease_token, run.lease_until = None, None
-            return run_json(run)
+            return run_json(run, session)
 
     def owner_finding(self, session, document_id, finding_id):
         finding = session.scalar(select(FindingRow).join(RunRow).where(
@@ -237,9 +295,14 @@ class Service:
             if count >= 20:
                 raise HTTPException(429, "Maximum 20 report snapshots per document reached")
             timestamp, report_id = now(), uid()
+            document_data = document_json(session, document)
             snapshot = {
                 "id": report_id, "document_id": document_id, "created_at": iso(timestamp),
-                "document": document_json(session, document), "disclaimer": DISCLAIMER,
+                "document": document_data, "disclaimer": DISCLAIMER, "schema_version": 3,
+                "overview": report_overview(document_data["metrics"]["assessment"]),
+                "input_sha256": hashlib.sha256(document.text.encode("utf-8")).hexdigest(),
+                "parser_version": run.parser_version,
+                "review_versions": {f["id"]: f["version"] for f in document_data["findings"]},
             }
             session.add(ReportRow(id=report_id, document_id=document_id, created_at=timestamp, snapshot=snapshot))
             return snapshot

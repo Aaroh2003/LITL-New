@@ -24,8 +24,8 @@ def _error_payload(response, deadline):
         return {}
 
 
-def bounded_request(client, method, url, *, limit=4 * 1024 * 1024, **kwargs):
-    deadline = time.monotonic() + 20
+def bounded_request(client, method, url, *, limit=4 * 1024 * 1024, deadline_seconds=20, **kwargs):
+    deadline = time.monotonic() + deadline_seconds
     try:
         with client.stream(method, url, **kwargs) as response:
             if response.status_code < 200 or response.status_code >= 300:

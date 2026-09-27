@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, Column, ForeignKey, Integer, LargeBinary, String, Table, Text
+from sqlalchemy import JSON, Boolean, Column, ForeignKey, Integer, LargeBinary, String, Table, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -65,6 +65,28 @@ class RunRow(Base):
     parser_version: Mapped[str] = mapped_column(String(40), default="deterministic-1")
 
 
+class SourceBudgetRow(Base):
+    __tablename__ = "source_budgets"
+    scope: Mapped[str] = mapped_column(String(100), primary_key=True)
+    reserved_paise: Mapped[int] = mapped_column(default=0)
+
+
+class RunScopeRow(Base):
+    __tablename__ = "analysis_scopes"
+    run_id: Mapped[str] = mapped_column(ForeignKey("analysis_runs.id", ondelete="CASCADE"), primary_key=True)
+    data: Mapped[dict] = mapped_column(JSON)
+
+
+class SourceRequestRow(Base):
+    __tablename__ = "source_requests"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    run_id: Mapped[str] = mapped_column(ForeignKey("analysis_runs.id", ondelete="CASCADE"), index=True)
+    operation: Mapped[str] = mapped_column(String(20))
+    cost_paise: Mapped[int]
+    price_version: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[float]
+
+
 finding_sources = Table(
     "finding_sources", Base.metadata,
     Column("finding_id", ForeignKey("findings.id", ondelete="CASCADE"), primary_key=True),
@@ -115,3 +137,51 @@ class ReportRow(Base):
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
     created_at: Mapped[float]
     snapshot: Mapped[dict] = mapped_column(JSON)
+
+
+class SummaryConsentRow(Base):
+    __tablename__ = "summary_consents"
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True)
+    accepted_at: Mapped[float]
+    version: Mapped[str] = mapped_column(String(40), default="gemini-summary-1")
+
+
+class SummaryJobRow(Base):
+    __tablename__ = "summary_jobs"
+    __table_args__ = (UniqueConstraint("run_id", "request_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    run_id: Mapped[str] = mapped_column(ForeignKey("analysis_runs.id", ondelete="CASCADE"), index=True)
+    request_key: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    created_at: Mapped[float]
+    consent_at: Mapped[float]
+    finished_at: Mapped[float | None]
+    lease_token: Mapped[str | None] = mapped_column(String(36))
+    lease_until: Mapped[float | None]
+    error: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(80))
+    prompt_version: Mapped[str] = mapped_column(String(40), default="gemini-summary-2")
+    input_packet: Mapped[dict | None] = mapped_column(JSON)
+    input_sha256: Mapped[str | None] = mapped_column(String(64))
+    output: Mapped[dict | None] = mapped_column(JSON)
+    usage: Mapped[dict | None] = mapped_column(JSON)
+    reserved_microusd: Mapped[int] = mapped_column(default=0)
+    review_state: Mapped[str] = mapped_column(String(16), default="unreviewed")
+    review_version: Mapped[int] = mapped_column(default=0)
+
+
+class SummaryQuotaRow(Base):
+    __tablename__ = "summary_quotas"
+    scope: Mapped[str] = mapped_column(String(100), primary_key=True)
+    requests: Mapped[int] = mapped_column(default=0)
+    reserved_microusd: Mapped[int] = mapped_column(default=0)
+
+
+class SummaryReviewEvent(Base):
+    __tablename__ = "summary_review_events"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    summary_id: Mapped[str] = mapped_column(ForeignKey("summary_jobs.id", ondelete="CASCADE"), index=True)
+    actor_id: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[float]
+    decision: Mapped[str] = mapped_column(String(16))
+    version: Mapped[int]

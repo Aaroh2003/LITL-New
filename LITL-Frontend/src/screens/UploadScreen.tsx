@@ -15,6 +15,7 @@ export default function UploadScreen() {
   const [text, setText] = useState('')
   const [title, setTitle] = useState('')
   const [consent, setConsent] = useState(false)
+  const [aiConsent, setAiConsent] = useState(false)
   const [busy, setBusy] = useState(false)
   const [stage, setStage] = useState('')
   const [error, setError] = useState('')
@@ -46,11 +47,12 @@ export default function UploadScreen() {
       let doc: Document
       if (mode === 'text') {
         setStage('Submitting text…')
-        doc = await api<Document>('/v1/documents/text', { method: 'POST', signal: operation.signal, body: JSON.stringify({ title: title.trim() || 'Untitled document', text, consent: true }) })
+        doc = await api<Document>('/v1/documents/text', { method: 'POST', signal: operation.signal, body: JSON.stringify({ title: title.trim() || 'Untitled document', text, consent: true, ai_summary_consent: aiConsent }) })
       } else if (config.storage_mode === 'local') {
         setStage('Uploading file to your local API…')
         const body = new FormData()
         body.set('file', file!); body.set('consent', 'true')
+        body.set('ai_summary_consent', String(aiConsent))
         doc = await api<Document>('/v1/documents/file', { method: 'POST', signal: operation.signal, body })
       } else {
         if (pendingId) {
@@ -64,7 +66,7 @@ export default function UploadScreen() {
           setPendingId('')
         }
         setStage('Preparing private storage upload…')
-        const upload = await api<{ document_id: string; upload_url: string; upload_headers: Record<string, string> }>('/v1/uploads', { method: 'POST', signal: operation.signal, body: JSON.stringify({ file_name: file!.name, size: file!.size, consent: true }) })
+        const upload = await api<{ document_id: string; upload_url: string; upload_headers: Record<string, string> }>('/v1/uploads', { method: 'POST', signal: operation.signal, body: JSON.stringify({ file_name: file!.name, size: file!.size, consent: true, ai_summary_consent: aiConsent }) })
         if (operation.signal.aborted) return
         setPendingId(upload.document_id)
         setStage('Uploading directly to private storage…')
@@ -90,8 +92,9 @@ export default function UploadScreen() {
         </div>
         {mode === 'text' ? <><label>Document title<input value={title} maxLength={200} disabled={busy} onChange={(event) => setTitle(event.target.value)} /></label><label>Document text<textarea rows={12} required disabled={busy} value={text} onChange={(event) => setText(event.target.value)} placeholder="Paste public, synthetic or fully anonymized legal text…" /><span className={count > config.max_characters ? 'text-red text-small' : 'text-small text-slate'}>{count.toLocaleString()} / {config.max_characters.toLocaleString()} characters</span></label></> : null}
         <p className="text-small text-slate">Maximum {(config.max_file_bytes / 1024 / 1024).toFixed(0)} MB, {config.max_pages} extracted pages, {config.max_characters.toLocaleString()} characters. Scanned/image-only or encrypted PDFs and OCR are unsupported. Original files are never edited.</p>
-        {!config.source_lookup_configured && <p className="notice">External source lookup is not configured. References can be detected and reviewed, but unavailable sources are not verified.</p>}
+        {!config.source_lookup_configured && <p className="notice">External source lookup requires a backend API key, accepted provider terms and positive spending limits. References can still be detected, reviewed and reported, but unavailable sources are not verified.</p>}
         <label className="flex items-start gap-3"><input className="mt-1 shrink-0" type="checkbox" checked={consent} disabled={busy} required onChange={(event) => setConsent(event.target.checked)} /><span>I confirm this is public, synthetic or fully anonymized content, including metadata and embedded content — not confidential client/company data. I consent to storage and processing by the configured hosting providers, and sending detected references/quotations to legal-source providers when enabled. Default retention is 7 days; cleanup can pause during hosting sleep. <ButtonLink to="/help" size="sm" variant="ghost">Read data limitations</ButtonLink></span></label>
+        {config.ai_summary_configured ? <label className="flex items-start gap-3"><input type="checkbox" checked={aiConsent} disabled={busy || !!pendingId} onChange={event => setAiConsent(event.target.checked)} /><span>Generate an AI summary after analysis. I consent to sending extracted text and selected source excerpts to Google Gemini; this material contains no sensitive, confidential or personal information. Unpaid Gemini inputs/outputs may improve Google products. This uses a separate Gemini allowance and also applies to new analyses of this document.</span></label> : <p className="text-small text-slate">AI summaries are unavailable until Gemini is configured on the backend. Uploading still produces an evidence report.</p>}
         {error && <p className="notice error" role="alert">{error}</p>}
         {stage && <p role="status">{stage}</p>}
         <div className="row"><Button type="submit" disabled={busy || !consent}>{busy ? 'Working…' : pendingId ? 'Retry upload' : 'Upload and analyze'}</Button>{busy && <Button variant="secondary" onClick={() => { controller.current?.abort(); setBusy(false); setStage('Request cancelled. The server may already have accepted it; check Documents before retrying.') }}>Cancel request</Button>}{pendingId && !busy && <Button variant="danger" onClick={() => void discard()}>Delete incomplete upload</Button>}<ButtonLink to="/documents" variant="ghost">Documents</ButtonLink></div>

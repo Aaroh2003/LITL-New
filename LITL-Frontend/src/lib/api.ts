@@ -9,11 +9,19 @@ export type Config = {
   max_characters: number
   max_pages: number
   source_lookup_configured: boolean
+  ai_summary_configured?: boolean
+  ai_summary_model?: string
+}
+export type SourceUsage = {
+  currency: 'INR'; reserved_paise: number; priced_requests: number; unpriced_requests: number
+  requests_by_operation: Partial<Record<'search' | 'document', number>>
+  price_versions: string[]; billing_status: 'unreconciled'
 }
 export type Run = {
   id: string; document_id: string
   status: 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled'
   stage: string; error: string | null; created_at: string; finished_at: string | null; warnings: string[]
+  source_usage?: SourceUsage
 }
 export type Source = {
   id: string; title: string; url: string; repository: string
@@ -26,13 +34,50 @@ export type Finding = {
   status: 'source_found' | 'ambiguous' | 'not_found' | 'unavailable' | 'unsupported' | 'not_checked' | 'quote_mismatch'
   note: string; sources: Source[]; decision: Decision | null; review_note: string; correction: string
   version: number; source_opened: boolean
+  evidence_message?: string
+  statute?: { identifier: string; act: string | null }
+  identity_assessment?: 'matched' | 'not_matched' | 'unknown'
+  link_state?: 'matched' | 'candidates' | 'not_found' | 'missing_context' | 'unavailable' | 'not_checked'
+  link_message?: string
+  reference_url?: string | null
+}
+export type SummarySection = 'overview' | 'key_points' | 'issues' | 'source_observations' | 'review_questions'
+export type AiSummary = {
+  id: string; run_id: string; status: 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled'
+  error: string | null; created_at: string; finished_at: string | null; consent_at: string
+  model: string; prompt_version: string; input_sha256: string | null
+  output: Record<SummarySection, { text: string; evidence_ids: string[] }[]> | null
+  evidence: Record<string, {
+    kind: 'draft' | 'source'; title: string; text: string; url: string | null
+    page?: number | null; locator?: string; truncated: boolean
+  }>
+  limitations: string[]; reserved_microusd: number
+  usage: { counted_input_tokens?: number; promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number; totalTokenCount?: number } | null
+  review_state: 'unreviewed' | 'reviewed' | 'rejected'; review_version: number
 }
 export type Metric = { numerator: number; denominator: number; percentage: number | null }
+export type FormulaMetric = Metric & {
+  label: string; formula: string; description: string; definition_version: string
+}
+export type AssessmentMetrics = {
+  definition_version: string
+  counts: {
+    processed: number; case_citations: number; distinct_case_labels: number; statutory_references: number
+    quotations: number; assessed_identities: number; located_cases: number; compared_quotes: number
+    wording_matches: number; reviewed: number; disposed: number; unreviewed: number; unresolved: number
+  }
+  metrics: Record<string, FormulaMetric>
+}
+export type AnalysisScope = {
+  detector_version: string; detected: number; processed: number; deferred: number
+  processing_limit: number; selection: string; detected_by_kind: Record<string, number>
+}
 export type Metrics = {
   source_coverage: Metric; citation_consistency: Metric; quotation_fidelity: Metric
   review_completion: Metric; resolution_coverage: Metric; source_activity: Metric; evidence_provenance: Metric
   total: number; unreviewed: number; unresolved: number; ambiguous: number; unavailable: number
   unsupported?: number; not_found?: number; not_checked?: number; quote_mismatch?: number
+  assessment?: AssessmentMetrics
 }
 export type DocumentSummary = {
   id: string; file_name: string; title: string; created_at: string; expires_at: string; latest_run: Run | null
@@ -40,9 +85,16 @@ export type DocumentSummary = {
 export type Document = DocumentSummary & {
   text: string; paragraphs: { id: string; text: string; start: number; end: number; page: number | null }[]
   findings: Finding[]; metrics: Metrics
+  analysis_scope?: AnalysisScope | null
+  ai_summary?: AiSummary | null
+  ai_summary_requested?: boolean
 }
 export type ReportSummary = { id: string; document_id: string; created_at: string }
-export type Report = ReportSummary & { document: Document; disclaimer: string }
+export type Report = ReportSummary & {
+  document: Document; disclaimer: string; schema_version?: number; input_sha256?: string
+  parser_version?: string; review_versions?: Record<string, number>
+  overview?: { state: string; title: string; text: string; attention: { label: string; count: number }[]; method: string }
+}
 
 export class ApiError extends Error {
   status: number

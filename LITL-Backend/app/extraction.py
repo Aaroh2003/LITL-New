@@ -144,18 +144,56 @@ def extract_bounded(name, data):
 
 REPORTER = r"(?:\(\d{4}\)\s*\d{1,2}\s+SCC(?:\s*\((?:Cri|Civ)\))?\s+\d{1,6}|AIR\s+\d{4}\s+(?:SC|[A-Z][A-Za-z]{1,15})\s+\d{1,6})"
 NAME = r"\b[A-Z][A-Za-z.&'-]*(?:[ \t]+(?:[A-Z][A-Za-z.&'-]*|of|and|the)){0,5}[ \t]+(?i:v\.?|vs\.?|versus)[ \t]+[A-Z][A-Za-z.&'-]*(?:[ \t]+(?:[A-Z][A-Za-z.&'-]*|of|and|the)){0,6}"
-STATUTE = (
+STATUTE_IDENTIFIER = (
     r"\b(?:[Ss]ections?|[Ss]ec\.?|[Ss]\.|[Aa]rticles?|[Uu]/[Ss])\s+\d+[A-Za-z]?(?:\([0-9A-Za-z]+\))*"
     r"(?:\s*(?:,|and|&|to|-)\s*\d+[A-Za-z]?(?:\([0-9A-Za-z]+\))*){0,6}"
-    r"(?:\s+(?:of\s+)?(?:the\s+)?)?"
-    r"(?:(?:Code of Criminal Procedure|Criminal Procedure Code|Indian Penal Code|Indian Evidence Act|"
+)
+STATUTE_ACT = (
+    r"(?:Code of Criminal Procedure|Criminal Procedure Code|Indian Penal Code|Indian Evidence Act|"
     r"Bharatiya Nagarik Suraksha Sanhita|Bharatiya Nyaya Sanhita|Bharatiya Sakshya Adhiniyam|"
     r"Constitution(?: of India)?|[A-Z][A-Za-z ]{2,55}Act|Cr\.?P\.?C\.?|IPC|BNSS|BNS|BSA)"
-    r"(?:,?\s*(?:18|19|20)\d{2})?)?"
+    r"(?:,?\s*(?:18|19|20)\d{2})?"
 )
+STATUTE = STATUTE_IDENTIFIER + r"(?:\s+(?:of\s+)?(?:the\s+)?)?" + rf"(?:{STATUTE_ACT})?"
 
 
 def detect(text, paragraphs):
+    findings, warnings, _ = detect_with_scope(text, paragraphs)
+    return findings, warnings
+
+
+def statutory_details(label):
+    reference = " ".join(label.split())
+    identifier_match = re.match(STATUTE_IDENTIFIER, reference)
+    identifier = identifier_match.group().strip() if identifier_match else reference
+    remainder = reference[identifier_match.end():].strip() if identifier_match else ""
+    remainder = re.sub(r"^(?:of\s+)?(?:the\s+)?", "", remainder, flags=re.I)
+    act = remainder if re.fullmatch(STATUTE_ACT, remainder) else None
+    if act:
+        note = (
+            f"{identifier} is cited with {act}. The provision's text, version and applicability have not been verified. "
+            "Check the official legislation and amendments relevant to the matter's dates."
+        )
+        if re.search(r"Cr\.?P\.?C\.?|Code of Criminal Procedure|Criminal Procedure Code|BNSS|Bharatiya Nagarik Suraksha Sanhita", act, re.I):
+            note += " Check commencement and transitional provisions; do not assume a CrPC/BNSS section-number equivalence."
+        evidence = f"No authoritative passage for {identifier} in {act} was retrieved; statute lookup is not supported."
+    else:
+        note = (
+            f"{identifier} was detected, but the Act or Code is not identified in this reference. "
+            "A provision number alone cannot identify the applicable law. Confirm the Act or Code from the surrounding "
+            "document, then check its official text and applicable version."
+        )
+        evidence = (
+            f"No statute passage can be linked to {identifier} from this reference alone. "
+            "Identify the Act or Code first; no legal-source search was performed for this statutory reference."
+        )
+    return {
+        "statute": {"identifier": identifier, "act": act},
+        "note": note, "evidence_message": evidence, "explanation_version": "statute-1",
+    }
+
+
+def detect_with_scope(text, paragraphs):
     spans = []
     for pattern in (REPORTER, NAME):
         spans.extend((m.start(), m.end(), "case_citation") for m in re.finditer(pattern, text))
@@ -184,4 +222,11 @@ def detect(text, paragraphs):
     warnings = ["Deterministic English pattern detection is incomplete; undetected references and legal propositions are not assessed."]
     if len(spans) > MAX_FINDINGS:
         warnings.append(f"Detected {len(spans)} references; only the first {MAX_FINDINGS} are processed due to the safety budget.")
-    return findings, warnings
+    return findings, warnings, {
+        "detector_version": "deterministic-2",
+        "detected": len(spans), "processed": len(findings), "deferred": len(spans) - len(findings),
+        "processing_limit": MAX_FINDINGS, "selection": "first occurrences in document order",
+        "detected_by_kind": {kind: sum(item[2] == kind for item in spans) for kind in (
+            "case_citation", "quotation", "statutory_reference",
+        )},
+    }

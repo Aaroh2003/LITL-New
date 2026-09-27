@@ -13,12 +13,13 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
+from uvicorn import Config as UvicornConfig
 
 from app.config import MAX_CHARACTERS, MAX_FILE_BYTES, Settings
 from app.db import Database
 from app.extraction import ExtractionError, detect, extract, extract_bounded, paragraphs_for
 from app.main import create_app
-from app.models import DocumentRow, FindingRow, ReportRow, ReviewEvent, RunRow, SourceOpen, now, uid
+from app.models import Base, DocumentRow, FindingRow, ReportRow, ReviewEvent, RunRow, RunScopeRow, SourceBudgetRow, SourceOpen, SourceRequestRow, now, uid
 from app.network import RemoteError, bounded_request
 from app.sources import IndianKanoon, identity_matches, normalize_quote
 from app.storage import SupabaseStorage
@@ -41,7 +42,11 @@ class BackendTests(unittest.TestCase):
     def setUp(self):
         self.directory = Path(".test-data") / uid()
         self.directory.mkdir(parents=True)
-        self.settings = Settings(database_url=f"sqlite:///{self.directory}/test.db", worker_enabled=False, testing=True)
+        self.settings = Settings(
+            database_url=f"sqlite:///{self.directory}/test.db", worker_enabled=False, testing=True,
+            ik_token="", ik_terms_accepted=False, ik_budget_paise=10000, ik_run_budget_paise=5000,
+            ik_daily_budget_paise=10000, ik_owner_daily_budget_paise=10000,
+        )
         self.http = httpx.Client(transport=httpx.MockTransport(source_http), follow_redirects=False)
         self.app = create_app(self.settings, self.http)
         self.client = TestClient(self.app)
@@ -72,6 +77,176 @@ class BackendTests(unittest.TestCase):
         self.assertNotIn("ik_token", config)
         self.assertEqual(self.client.get("/healthz").status_code, 200)
         self.assertEqual(self.client.get("/readyz").status_code, 200)
+
+    def test_local_env_file_and_exported_precedence(self):
+        env_file = self.directory / ".env"
+        env_file.write_text(
+            "INDIAN_KANOON_API_TOKEN=file-token\nINDIAN_KANOON_TERMS_ACCEPTED=true\n"
+            "INDIAN_KANOON_BUDGET_PAISE=40000\n"
+        )
+        with patch.dict("os.environ", {"INDIAN_KANOON_API_TOKEN": "exported-token"}, clear=True):
+            UvicornConfig("app.main:app", env_file=str(env_file), log_config=None)
+            settings = Settings()
+            settings.validate()
+            self.assertEqual(settings.ik_token, "exported-token")
+            self.assertTrue(settings.source_lookup_configured)
+            self.assertEqual(settings.ik_budget_paise, 40000)
+            self.assertNotIn("exported-token", repr(settings))
+            self.assertNotIn("exported-token", json.dumps(settings.public()))
+
+    def test_zero_budget_prevents_network_calls(self):
+        self.settings.ik_budget_paise = 0
+        with patch.object(self.http, "stream", side_effect=AssertionError("Must not contact provider")):
+            document = self.complete(live=True)
+            self.client.get("/healthz")
+            self.client.get("/readyz")
+            self.client.get("/v1/config")
+        self.assertEqual(document["findings"][0]["status"], "unavailable")
+        self.assertEqual(document["latest_run"]["source_usage"]["reserved_paise"], 0)
+
+    def test_source_spending_limits_and_partial_report(self):
+        for limit in ("ik_budget_paise", "ik_run_budget_paise", "ik_daily_budget_paise", "ik_owner_daily_budget_paise"):
+            with self.subTest(limit=limit):
+                original = getattr(self.settings, limit)
+                with self.db.sessions() as session:
+                    spent = session.get(SourceBudgetRow, "ik:account")
+                    current = spent.reserved_paise if spent else 0
+                setattr(self.settings, limit, 50 if limit == "ik_run_budget_paise" else current + 50)
+                document = self.complete(live=True)
+                self.assertEqual(document["findings"][0]["status"], "unavailable")
+                self.assertIn("spending limit", document["findings"][0]["note"])
+                usage = document["latest_run"]["source_usage"]
+                self.assertEqual(usage["reserved_paise"], 50)
+                self.assertEqual(usage["requests_by_operation"], {"search": 1})
+                report = self.client.post(f"/v1/documents/{document['id']}/reports")
+                self.assertEqual(report.status_code, 200)
+                self.assertEqual(report.json()["document"]["latest_run"]["source_usage"], usage)
+                setattr(self.settings, limit, original)
+
+    def test_exact_budget_allows_request_then_refuses_more(self):
+        self.settings.ik_budget_paise = 70
+        document = self.complete(live=True)
+        self.assertEqual(document["findings"][0]["status"], "source_found")
+        self.assertEqual(document["latest_run"]["source_usage"]["reserved_paise"], 70)
+        second = self.complete(live=True)
+        self.assertEqual(second["findings"][0]["status"], "unavailable")
+        self.assertEqual(second["latest_run"]["source_usage"]["reserved_paise"], 0)
+        with self.db.sessions() as session:
+            self.assertEqual(session.get(SourceBudgetRow, "ik:account").reserved_paise, 70)
+
+    def test_cost_snapshot_survives_later_analysis_and_no_read_spend(self):
+        document = self.complete(live=True, text=SAMPLE.split("\n")[0])
+        base = f"/v1/documents/{document['id']}"
+        with patch.object(self.http, "stream", side_effect=AssertionError("Reads must not contact provider")):
+            report = self.client.post(base + "/reports").json()
+            self.assertEqual(report["document"]["latest_run"]["source_usage"]["reserved_paise"], 70)
+            self.assertEqual(report["document"]["latest_run"]["source_usage"]["billing_status"], "unreconciled")
+            self.assertEqual(self.client.get(base + "/reports/" + report["id"]).json(), report)
+        self.assertEqual(self.client.post(base + "/analyses").status_code, 200)
+        self.worker.tick()
+        self.assertEqual(self.client.get(base + "/reports/" + report["id"]).json(), report)
+        with self.db.sessions() as session:
+            self.assertEqual(session.get(SourceBudgetRow, "ik:account").reserved_paise, 140)
+
+    def test_uncertain_requests_remain_reserved_after_recovery_and_deletion(self):
+        self.settings.ik_token, self.settings.ik_terms_accepted = "synthetic-token", True
+        document = self.create(text=SAMPLE.split("\n")[0])
+        job = self.worker.claim()
+        self.assertTrue(self.worker.heartbeat(job, reserve="search"))
+        with self.db.transaction() as session:
+            session.execute(update(RunRow).values(lease_until=now() - 1))
+        replacement_db = Database(self.settings.database_url)
+        try:
+            replacement = Worker(replacement_db, self.settings, None, self.http, self.app.state.service)
+            self.assertTrue(replacement.tick())
+        finally:
+            replacement_db.engine.dispose()
+        result = self.client.get(f"/v1/documents/{document['id']}").json()
+        self.assertEqual(result["latest_run"]["source_usage"]["reserved_paise"], 120)
+        self.assertEqual(self.client.delete(f"/v1/documents/{document['id']}").status_code, 204)
+        with self.db.sessions() as session:
+            self.assertEqual(session.get(SourceBudgetRow, "ik:account").reserved_paise, 120)
+            self.assertEqual(session.scalar(select(func.count()).select_from(SourceRequestRow)), 0)
+
+    def test_concurrent_account_reservations_across_owners(self):
+        self.settings.ik_budget_paise = 50
+        for owner in ("owner-a", "owner-b"):
+            self.app.state.service.create(owner, "Synthetic", "text.txt", text=SAMPLE)
+        jobs = [self.worker.claim(), self.worker.claim()]
+        barrier, results, errors = threading.Barrier(2), [], []
+        def reserve(job):
+            try:
+                barrier.wait(timeout=5)
+                results.append(self.worker.heartbeat(job, reserve="search"))
+            except Exception as exc:
+                errors.append(exc)
+        threads = [threading.Thread(target=reserve, args=(job,)) for job in jobs]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(results), [False, True])
+        with self.db.sessions() as session:
+            self.assertEqual(session.get(SourceBudgetRow, "ik:account").reserved_paise, 50)
+            self.assertEqual(session.scalar(select(func.count()).select_from(SourceRequestRow)), 1)
+
+    def test_daily_budget_resets_without_resetting_lifetime(self):
+        from datetime import datetime, timezone
+        self.settings.ik_daily_budget_paise = 50
+        document = self.create()
+        job = self.worker.claim()
+        with patch("app.budget.datetime") as clock:
+            clock.now.return_value = datetime(2026, 9, 25, 23, 59, tzinfo=timezone.utc)
+            self.assertTrue(self.worker.heartbeat(job, reserve="search"))
+            self.assertFalse(self.worker.heartbeat(job, reserve="search"))
+            clock.now.return_value = datetime(2026, 9, 26, 0, 0, tzinfo=timezone.utc)
+            self.assertTrue(self.worker.heartbeat(job, reserve="search"))
+        with self.db.sessions() as session:
+            self.assertEqual(session.get(SourceBudgetRow, "ik:account").reserved_paise, 100)
+        result = self.client.get(f"/v1/documents/{document['id']}").json()
+        self.assertEqual(result["latest_run"]["source_usage"]["reserved_paise"], 100)
+
+    def test_cost_accounting_handles_legacy_unpriced_runs(self):
+        document = self.create()
+        with self.db.transaction() as session:
+            session.execute(update(RunRow).values(source_requests=2))
+        result = self.client.get(f"/v1/documents/{document['id']}").json()
+        self.assertEqual(result["latest_run"]["source_usage"]["unpriced_requests"], 2)
+        self.settings.ik_run_budget_paise = 149
+        job = self.worker.claim()
+        self.assertFalse(self.worker.heartbeat(job, reserve="search"))
+
+    def test_source_failure_still_consumes_reserved_budget(self):
+        def timeout(request):
+            raise httpx.ReadTimeout("synthetic timeout")
+        with httpx.Client(transport=httpx.MockTransport(timeout)) as client:
+            self.worker.client = client
+            document = self.complete(live=True)
+        self.assertEqual(document["findings"][0]["status"], "unavailable")
+        self.assertEqual(document["latest_run"]["source_usage"]["reserved_paise"], 50)
+
+    def test_source_request_records_are_immutable(self):
+        self.complete(live=True)
+        with self.assertRaises(IntegrityError):
+            with self.db.transaction() as session:
+                session.execute(update(SourceRequestRow).values(cost_paise=0))
+
+    def test_existing_schema_upgrade_preserves_saved_report(self):
+        document = self.complete()
+        snapshot = self.client.post(f"/v1/documents/{document['id']}/reports").json()
+        # Simulate a pre-accounting deployment without replacing its existing tables.
+        with self.db.engine.begin() as connection:
+            Base.metadata.tables["source_requests"].drop(connection)
+            Base.metadata.tables["source_budgets"].drop(connection)
+        self.db.setup()
+        self.db.setup()
+        self.assertEqual(
+            self.client.get(f"/v1/documents/{document['id']}/reports/{snapshot['id']}").json(), snapshot,
+        )
+        with self.db.sessions() as session:
+            self.assertEqual(session.scalar(select(func.count()).select_from(SourceRequestRow)), 0)
 
     def test_durable_create_and_unconfigured_evidence(self):
         document = self.create()
@@ -110,6 +285,76 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(document["findings"], [])
         self.assertEqual(document["metrics"]["total"], 0)
         self.assertIsNone(document["metrics"]["source_coverage"]["percentage"])
+
+    def test_dynamic_statute_and_formula_report_without_source_spending(self):
+        with patch.object(self.http, "stream", side_effect=AssertionError("No statute API calls")):
+            document = self.complete(live=True, text="Section 335")
+        item = document["findings"][0]
+        self.assertIsNone(item["statute"]["act"])
+        self.assertIn("Act or Code", item["note"])
+        self.assertNotIn("CrPC/BNSS", item["note"])
+        self.assertEqual(document["analysis_scope"]["detected"], 1)
+        base = f"/v1/documents/{document['id']}"
+        snapshot = self.client.post(base + "/reports").json()
+        self.assertEqual(snapshot["schema_version"], 3)
+        self.assertEqual(snapshot["overview"]["state"], "review_incomplete")
+        self.assertEqual(snapshot["document"]["metrics"]["assessment"]["definition_version"], "evidence-2")
+        self.assertEqual(snapshot["review_versions"], {item["id"]: 0})
+        self.assertEqual(len(snapshot["input_sha256"]), 64)
+        self.assertEqual(snapshot["parser_version"], "deterministic-2")
+        reviewed = self.client.put(base + f"/findings/{item['id']}/review", json={
+            "decision": "unresolved", "review_note": "Act needs identifying", "correction": "", "expected_version": 0,
+        })
+        self.assertEqual(reviewed.status_code, 200)
+        self.assertEqual(self.client.get(base + "/reports/" + snapshot["id"]).json(), snapshot)
+        newer = self.client.post(base + "/reports").json()
+        self.assertEqual(newer["overview"]["state"], "reviewed_with_unresolved")
+        self.assertEqual(newer["document"]["metrics"]["assessment"]["metrics"]["review_completion"]["percentage"], 100)
+        self.assertEqual(newer["document"]["metrics"]["assessment"]["metrics"]["review_disposition"]["percentage"], 0)
+
+    def test_old_live_statutes_get_context_but_old_snapshots_are_unchanged(self):
+        document = self.complete(text="Section 335")
+        base = f"/v1/documents/{document['id']}"
+        legacy = {"document": document, "disclaimer": "Original saved disclaimer"}
+        legacy["document"]["findings"][0]["note"] = "Original saved generic note"
+        legacy["document"]["metrics"].pop("assessment")
+        with self.db.transaction() as session:
+            item = session.scalar(select(FindingRow))
+            item.data = {**{key: value for key, value in item.data.items() if key not in {
+                "link_state", "link_message", "reference_url",
+            }}, "note": "Old generic note"}
+            session.delete(session.get(RunScopeRow, document["latest_run"]["id"]))
+            report = ReportRow(id=uid(), document_id=document["id"], created_at=now(), snapshot=legacy)
+            session.add(report)
+            report_id = report.id
+        live = self.client.get(base).json()
+        self.assertIn("not identified in this reference", live["findings"][0]["note"])
+        self.assertIsNone(live["analysis_scope"])
+        self.assertEqual(self.client.get(base + "/reports/" + report_id).json(), legacy)
+
+    def test_identity_metric_excludes_competing_matches(self):
+        def competing(request):
+            if request.url.path == "/search/":
+                return httpx.Response(200, json={"docs": [{"tid": 123}, {"tid": 456}]})
+            return httpx.Response(200, json={"title": "Alpha v. Beta", "doc": BODY})
+        with httpx.Client(transport=httpx.MockTransport(competing)) as client:
+            self.worker.client = client
+            document = self.complete(live=True)
+        self.assertEqual(document["findings"][0]["identity_assessment"], "unknown")
+        self.assertEqual(document["metrics"]["assessment"]["counts"]["assessed_identities"], 0)
+
+    def test_compared_nonmatching_candidate_is_scoped_not_invalid(self):
+        def different(request):
+            if request.url.path == "/search/":
+                return httpx.Response(200, json={"docs": [{"tid": 456}]})
+            return httpx.Response(200, json={"title": "Gamma v. Delta", "doc": "Equivalent citations: (2021) 1 SCC 200"})
+        with httpx.Client(transport=httpx.MockTransport(different)) as client:
+            self.worker.client = client
+            document = self.complete(live=True)
+        self.assertEqual(document["findings"][0]["status"], "ambiguous")
+        self.assertEqual(document["findings"][0]["identity_assessment"], "not_matched")
+        self.assertEqual(document["metrics"]["assessment"]["metrics"]["identity_match"]["percentage"], 0)
+        self.assertIn("does not prove the reference invalid", document["findings"][0]["note"])
 
     def test_unicode_offsets_and_reference_limit(self):
         document = self.complete(text="😀 Context.\n" + "\n".join(f"Section {n} of CrPC" for n in range(1, 55)))
@@ -329,13 +574,13 @@ class BackendTests(unittest.TestCase):
         job = self.worker.claim()
         with self.db.transaction() as session:
             session.execute(update(RunRow).values(source_requests=50))
-        self.assertFalse(self.worker.heartbeat(job, reserve=True))
+        self.assertFalse(self.worker.heartbeat(job, reserve="search"))
         with self.db.transaction() as session:
             session.execute(update(RunRow).values(attempts=3, lease_until=now() - 1))
         self.assertFalse(self.worker.tick())
         self.assertEqual(self.client.get("/v1/documents/" + document["id"]).json()["latest_run"]["status"], "failed")
 
-    def test_actual_mock_requests_never_exceed_fifty(self):
+    def test_duplicate_references_reuse_one_lookup(self):
         requests = []
         def counting(request):
             requests.append(request)
@@ -343,11 +588,24 @@ class BackendTests(unittest.TestCase):
         with httpx.Client(transport=httpx.MockTransport(counting)) as client:
             self.worker.client = client
             document = self.complete(live=True, text="\n".join(["(2020) 1 SCC 100"] * 50))
-        self.assertEqual(len(requests), 50)
-        self.assertEqual(document["metrics"]["source_coverage"]["numerator"], 25)
-        self.assertEqual(document["metrics"]["unavailable"], 25)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(document["metrics"]["source_coverage"]["numerator"], 50)
+        self.assertEqual(document["metrics"]["unavailable"], 0)
         with self.db.sessions() as session:
-            self.assertEqual(session.scalar(select(RunRow.source_requests)), 50)
+            self.assertEqual(session.scalar(select(RunRow.source_requests)), 2)
+
+    def test_distinct_query_limit_is_ten_and_survives_recovery(self):
+        document = self.complete(live=True, text="\n".join(f"(2020) 1 SCC {100+i}" for i in range(50)))
+        self.assertEqual(sum(f["status"] == "not_checked" for f in document["findings"]), 40)
+        self.assertEqual(document["latest_run"]["source_usage"]["requests_by_operation"]["search"], 10)
+        new = self.create()
+        job = self.worker.claim()
+        for _ in range(10):
+            self.assertTrue(self.worker.heartbeat(job, reserve="search"))
+        with self.db.transaction() as session:
+            session.execute(update(RunRow).where(RunRow.id == new["latest_run"]["id"]).values(lease_until=now()-1))
+        replacement = self.worker.claim()
+        self.assertFalse(self.worker.heartbeat(replacement, reserve="search"))
 
     def test_daily_and_concurrent_owner_quotas(self):
         self.settings.max_documents = 1
@@ -586,7 +844,21 @@ class ExtractionTests(unittest.TestCase):
 
 class ConnectorTests(unittest.TestCase):
     def settings(self):
-        return Settings(ik_token="test-secret", ik_terms_accepted=True)
+        return Settings(ik_token="test-secret", ik_terms_accepted=True, ik_budget_paise=40000)
+
+    def test_budget_configuration_fails_closed(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertFalse(Settings(ik_token="test", ik_terms_accepted=True).source_lookup_configured)
+            for value in ("-1", "1.50", "NaN", "400 rupees", "", " ", "1" * 5000):
+                with self.subTest(value=value[:30]), patch.dict("os.environ", {"INDIAN_KANOON_BUDGET_PAISE": value}):
+                    with self.assertRaisesRegex(ValueError, "paise"):
+                        Settings()
+            for value in (-1, 1.5, True, 2_000_000_001):
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    Settings(ik_budget_paise=value).validate()
+            for value in ("key\nheader", "key with spaces", "non-ascii-\u00e9"):
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    Settings(ik_token=value).validate()
 
     def test_document_body_citation_does_not_establish_identity(self):
         self.assertFalse(identity_matches("(2020) 1 SCC 100", "Other v. Case", "The applicant cited (2020) 1 SCC 100."))
@@ -599,7 +871,7 @@ class ConnectorTests(unittest.TestCase):
             requests.append(request)
             return source_http(request)
         with httpx.Client(transport=httpx.MockTransport(transport)) as client:
-            connector = IndianKanoon(self.settings(), client, lambda: True)
+            connector = IndianKanoon(self.settings(), client, lambda operation: True)
             result = connector.resolve({"label": "Alpha v. Beta, (2020) 1 SCC 100"})
         self.assertEqual(result[0], "source_found")
         self.assertEqual(len(requests), 2)
@@ -612,22 +884,22 @@ class ConnectorTests(unittest.TestCase):
                 return httpx.Response(200, json={"docs": [{"tid": 123}, {"tid": 456}]})
             return httpx.Response(200, json={"title": "Alpha v. Beta", "doc": BODY})
         with httpx.Client(transport=httpx.MockTransport(transport)) as client:
-            result = IndianKanoon(self.settings(), client, lambda: True).resolve({"label": "Alpha v. Beta"})
+            result = IndianKanoon(self.settings(), client, lambda operation: True).resolve({"label": "Alpha v. Beta"})
         self.assertEqual(result[0], "ambiguous")
         self.assertEqual(len(result[2]), 2)
 
     def test_empty_search_is_not_found_and_credit_errors_unavailable(self):
         for status, data, expected in ((200, {"docs": []}, "not_found"), (403, {}, "unavailable"), (200, {"errmsg": "No credit"}, "unavailable")):
             with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(status, json=data))) as client:
-                result = IndianKanoon(self.settings(), client, lambda: True).resolve({"label": "(2020) 1 SCC 100"})
+                result = IndianKanoon(self.settings(), client, lambda operation: True).resolve({"label": "(2020) 1 SCC 100"})
                 self.assertEqual(result[0], expected)
 
     def test_budget_and_unsafe_candidate_ids(self):
         with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"docs": [{"tid": "https://127.0.0.1/"}]}))) as client:
-            result = IndianKanoon(self.settings(), client, lambda: True).resolve({"label": "Alpha v. Beta"})
+            result = IndianKanoon(self.settings(), client, lambda operation: True).resolve({"label": "Alpha v. Beta"})
             self.assertEqual(result[0], "unavailable")
         client = Mock()
-        result = IndianKanoon(self.settings(), client, lambda: False).resolve({"label": "Alpha v. Beta"})
+        result = IndianKanoon(self.settings(), client, lambda operation: False).resolve({"label": "Alpha v. Beta"})
         self.assertEqual(result[0], "unavailable")
         client.stream.assert_not_called()
 

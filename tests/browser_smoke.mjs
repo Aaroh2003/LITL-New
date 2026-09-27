@@ -1,5 +1,5 @@
 // Uses an already installed Chrome/Chromium via its DevTools pipe. No downloads.
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
@@ -47,14 +47,19 @@ function apiRequest(method, path, data) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const config = await apiRequest('GET', '/v1/config')
 assert.equal(config.auth_mode, 'local')
-assert.equal(config.source_lookup_configured, false,
-  'Disable the provider so this test cannot consume API credits.')
+const aiMock = process.env.LITL_TEST_AI_MOCK === '1'
+if (aiMock) {
+  assert.equal((await apiRequest('GET', '/test-mock-mode')).mock_providers, true, 'AI mode requires the mock-only test server.')
+  assert.equal(config.ai_summary_configured, true)
+} else {
+  assert.equal(config.source_lookup_configured, false, 'Disable the provider so this test cannot consume API credits.')
+}
 
 const profile = await mkdtemp(join(tmpdir(), 'litl-browser-smoke-'))
 const title = `Synthetic browser draft ${Date.now()}`
 const draftText = ['Synthetic', 'document', 'illustration', '\u{1f4c4}.', 'PUBLIC', 'SAMPLE', '(For', 'layout', 'review', 'only.)'].join('\n\n') +
   '\n\nSection\n41A\nCrPC\nis\nmentioned.\n\n' +
-  'Arnesh Kumar v. State of Bihar, (2014) 8 SCC 273 is cited.'
+  'Arnesh Kumar v. State of Bihar, (2014) 8 SCC 273 is cited. Section 335 is also mentioned.'
 let browser
 let documentId
 try {
@@ -179,7 +184,7 @@ try {
   await evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Paste text').click()`)
   await waitFor("document.querySelector('textarea') !== null")
   await evaluate(`(() => {
-    const titleInput = document.querySelector('form input:not([type="checkbox"])');
+    const titleInput = document.querySelector('form input:not([type="checkbox"]):not([type="file"])');
     const textInput = document.querySelector('textarea');
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(titleInput, ${JSON.stringify(title)});
     titleInput.dispatchEvent(new Event('input', {bubbles: true}));
@@ -187,6 +192,7 @@ try {
       ${JSON.stringify(draftText)});
     textInput.dispatchEvent(new Event('input', {bubbles: true}));
     document.querySelector('input[type="checkbox"]').click();
+    ${aiMock ? "document.querySelectorAll('form input[type=\"checkbox\"]')[1].click();" : ''}
   })()`)
   await evaluate("document.querySelector('form').requestSubmit()")
   documentId = await waitFor("location.pathname.match(/^\\/documents\\/([^/]+)\\/(?:analysis|summary)$/)?.[1]")
@@ -199,7 +205,22 @@ try {
     document = await apiRequest('GET', `/v1/documents/${documentId}`)
   }
   assert.equal(document.latest_run?.status, 'completed')
+  if (aiMock) {
+    const summaryDeadline = Date.now() + 15000
+    while (['queued', 'processing'].includes(document.ai_summary?.status) && Date.now() < summaryDeadline) {
+      await sleep(200)
+      document = await apiRequest('GET', `/v1/documents/${documentId}`)
+    }
+    assert.equal(document.ai_summary?.status, 'completed', JSON.stringify(document.ai_summary))
+  }
   assert(document.findings.length > 0)
+  const bareStatute = document.findings.find(finding => finding.statute?.identifier === 'Section 335')
+  assert(bareStatute, 'Bare statutory reference must be detected.')
+  assert.equal(bareStatute.statute.act, null)
+  assert(!bareStatute.note.includes('CrPC/BNSS'))
+  await visit(`/documents/${documentId}/review/${bareStatute.id}`, bareStatute.note)
+  assert(await evaluate(`document.body.innerText.includes(${JSON.stringify(bareStatute.evidence_message)})`))
+  assert(await evaluate(`Array.from(document.querySelectorAll('a')).some(a => a.href.startsWith('https://www.google.com/search?') && new URL(a.href).searchParams.get('q') === 'site:indiankanoon.org/doc/ Section 335' && new URL(a.href).searchParams.get('btnI') === '1')`))
   await visit('/documents', title)
   await visit(`/documents/${documentId}/summary`, title)
   await visit(`/documents/${documentId}/review/${document.findings[0].id}`, title)
@@ -226,15 +247,68 @@ try {
   assert.equal(reviewed.findings[0].decision, 'unresolved')
   assert.equal(reviewed.metrics.review_completion.numerator, 1)
   await visit(`/documents/${documentId}/reports`, title)
-  await evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Save current report snapshot').click()`)
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Generate report').click()`)
   const reportId = await waitFor("location.pathname.match(/^\\/documents\\/[^/]+\\/reports\\/([^/]+)$/)?.[1]")
   const report = await apiRequest('GET', `/v1/documents/${documentId}/reports/${reportId}`)
   assert.equal(report.document.findings[0].decision, 'unresolved')
+  assert.equal(report.document.latest_run.source_usage.reserved_paise, aiMock ? 140 : 0)
+  assert.equal(report.document.latest_run.source_usage.billing_status, 'unreconciled')
+  assert.equal(report.schema_version, 3)
+  assert.equal(report.document.metrics.assessment.definition_version, 'evidence-2')
+  assert.equal(report.document.analysis_scope.deferred, 0)
   await visit(`/documents/${documentId}/reports/${reportId}`, title)
+  await waitFor("document.body.innerText.includes('Indian Kanoon usage at snapshot')")
+  assert(await evaluate("document.body.innerText.includes('not a confirmed provider charge')"))
   const reportSelector = 'article[aria-label="Snapshot document reading view"]'
+  if (aiMock) {
+    assert.equal(report.document.ai_summary.status, 'completed')
+    assert.equal(report.document.ai_summary.review_state, 'unreviewed')
+    assert(await evaluate("document.body.innerText.includes('The uploaded synthetic draft contains legal references.')"))
+    assert(await evaluate(`!!document.querySelector(${JSON.stringify(reportSelector + ' a[href="https://indiankanoon.org/doc/123/"]')})`))
+    assert(await evaluate(`!!document.querySelector(${JSON.stringify('#finding-' + bareStatute.id)})`))
+  }
   assertReadingLayout(await readingLayout(reportSelector))
   await command('Emulation.setEmulatedMedia', { media: 'print' }, sessionId)
   assertReadingLayout(await readingLayout(reportSelector))
+  const printedText = await evaluate('document.body.innerText')
+  assert(printedText.includes('Indian Kanoon usage at snapshot'))
+  assert(printedText.includes('not a confirmed provider charge'))
+  assert(printedText.includes('Evidence and review calculations'))
+  assert(printedText.includes('N/A'))
+  assert(printedText.includes('|A| / |C|'))
+  assert(printedText.includes(report.overview.title))
+  assert(printedText.includes(report.disclaimer))
+  for (const warning of report.document.latest_run.warnings) assert(printedText.includes(warning))
+  const pdf = await command('Page.printToPDF', { printBackground: true }, sessionId)
+  assert.equal(Buffer.from(pdf.data, 'base64').subarray(0, 5).toString(), '%PDF-')
+  const extractedPdf = spawnSync(
+    process.env.LITL_TEST_PYTHON || new URL('../LITL-Backend/.venv/bin/python', import.meta.url).pathname,
+    ['-c', `import io,json,sys
+from pypdf import PdfReader
+reader = PdfReader(io.BytesIO(sys.stdin.buffer.read()))
+urls = []
+for page in reader.pages:
+    for annotation in page.get("/Annots", []):
+        action = annotation.get_object().get("/A")
+        if action and action.get_object().get("/URI"):
+            urls.append(str(action.get_object()["/URI"]))
+print(json.dumps({"text": "\\n".join(page.extract_text() or "" for page in reader.pages), "urls": urls}))`],
+    { input: Buffer.from(pdf.data, 'base64'), maxBuffer: 2 * 1024 * 1024 },
+  )
+  assert.equal(extractedPdf.status, 0, extractedPdf.error?.message || extractedPdf.stderr?.toString())
+  const pdfContent = JSON.parse(extractedPdf.stdout.toString())
+  const pdfText = pdfContent.text.replace(/\s+/g, ' ')
+  assert(pdfText.includes('Identity assessment coverage'))
+  assert(pdfText.includes('not a confirmed provider charge'))
+  assert(pdfText.includes('evidence-2'))
+  assert(pdfText.includes(report.overview.title))
+  assert(pdfContent.urls.some(url => url.startsWith('https://www.google.com/search?') && new URL(url).searchParams.get('btnI') === '1'))
+  if (aiMock) {
+    assert(pdfText.includes('The uploaded synthetic draft contains legal references.'))
+    assert(pdfText.includes('Not reviewed'))
+    assert(pdfContent.urls.includes('https://indiankanoon.org/doc/123/'))
+    assert(pdfContent.urls.includes('https://indiankanoon.org/doc/456/'))
+  }
   await command('Emulation.setEmulatedMedia', { media: 'screen' }, sessionId)
   assert.deepEqual(await apiRequest('GET', `/v1/documents/${documentId}/reports/${reportId}`), report,
     'Reading-layout changes must not mutate the saved snapshot or JSON export.')
