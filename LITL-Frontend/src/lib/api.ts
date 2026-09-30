@@ -28,6 +28,12 @@ export type Source = {
   retrieved_at: string; passage: string; locator: string | null
 }
 export type Decision = 'confirmed' | 'corrected' | 'rejected' | 'unresolved'
+export type AiExplanation = {
+  status: 'processing' | 'completed' | 'failed'
+  text: string | null; error: string | null; model: string
+  started_at: number; consent_at: string; finished_at: string | null
+  attempts: number; reserved_microusd: number
+}
 export type Finding = {
   id: string; run_id: string; kind: 'case_citation' | 'statutory_reference' | 'quotation'
   label: string; excerpt: string; start: number; end: number; paragraph_id: string | null; page: number | null
@@ -40,6 +46,7 @@ export type Finding = {
   link_state?: 'matched' | 'candidates' | 'not_found' | 'missing_context' | 'unavailable' | 'not_checked'
   link_message?: string
   reference_url?: string | null
+  ai_explanation?: AiExplanation
 }
 export type SummarySection = 'overview' | 'key_points' | 'issues' | 'source_observations' | 'review_questions'
 export type AiSummary = {

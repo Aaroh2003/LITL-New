@@ -20,6 +20,7 @@ from starlette.datastructures import UploadFile
 from .config import MAX_CHARACTERS, MAX_FILE_BYTES, Settings
 from .db import Database
 from .extraction import ExtractionError, file_kind
+from .explanations import Explanations
 from .models import DocumentRow, ReportRow, RunRow
 from .network import RemoteError, http_client, request_json
 from .service import Service, document_json, iso, run_json
@@ -426,6 +427,12 @@ def create_app(settings=None, client=None):
     @app.post("/v1/documents/{document_id}/findings/{finding_id}/source-open")
     def source_open(document_id: str, finding_id: str, body: SourceOpenInput, actor=Depends(owner)):
         return service.source_open(actor, document_id, finding_id, body.source_id)
+
+    @app.post("/v1/documents/{document_id}/findings/{finding_id}/explanation")
+    def explain(document_id: str, finding_id: str, body: SummaryInput, actor=Depends(owner)):
+        return Explanations(db, settings, service, worker.summaries, client).create(
+            actor, document_id, finding_id, body.request_key,
+        )
 
     @app.delete("/v1/documents/{document_id}", status_code=204)
     def remove(document_id: str, actor=Depends(owner)):

@@ -18,9 +18,12 @@ dependencies using the commands below. **Keep `package-lock.json` and
 `requirements.txt`**; they describe what must be installed.
 
 If you received `LITL-source.zip`, extract it and use the enclosed `LITL/` folder
-as the repository root. The ZIP excludes local databases/uploaded documents,
-real environment files, private keys, dependency folders, builds and AI-tool
-logs. Do not send a ZIP of an existing developer's entire working directory
+as the repository root. The private local handoff ZIP includes
+`LITL-Backend/.env` and `LITL-Frontend/.env.local` by request. **It contains
+credentials: keep it private, do not commit it, and remove real environment
+files before creating a public/shared source archive.** Local databases,
+uploaded documents, dependency folders, builds, caches and AI-tool logs are
+excluded. Do not send a ZIP of an existing developer's entire working directory
 instead: `LITL-Backend/.data/` can contain uploaded document bytes and reviews.
 
 For the quickest deployment, keep the frontend and backend in **one GitHub
@@ -152,6 +155,19 @@ Environment examples contain placeholders only; never commit real credentials,
 private keys, uploaded files or local databases.
 The backend does not automatically load `.env`; configure its environment
 through exported shell variables locally or the Render dashboard when hosted.
+If you have configured provider keys in `LITL-Backend/.env`, use this backend
+command instead (from `LITL-Backend`):
+
+```sh
+.venv/bin/uvicorn app.main:app --env-file .env --host 127.0.0.1 --port 8000 --workers 1 --limit-concurrency 16
+```
+
+Restart the backend after changing a key or setting; editing `.env` does not
+update a running process. Exported variables take precedence over `.env`.
+Gemini also requires `GEMINI_ENABLED=true` and a positive
+`GEMINI_BUDGET_MICROUSD`. Check `http://127.0.0.1:8000/v1/config` for
+`ai_summary_configured: true`, then refresh the frontend. This flag confirms
+local configuration, not provider authentication or quota availability.
 
 ## First use
 

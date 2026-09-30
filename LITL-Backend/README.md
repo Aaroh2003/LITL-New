@@ -3,8 +3,9 @@
 FastAPI + SQLAlchemy single-service legal-draft review beta. **Public, synthetic
 or fully anonymized English Indian-law documents only; never confidential client
 or company material.** One owner/reviewer, one or two manually provisioned testers.
-Optional consent-bound Gemini summaries; no scraping, automatic purchases,
-Redis or fake evidence. Gemini receives extracted text only after separate consent.
+Optional consent-bound Gemini summaries and reference explanations; no scraping,
+automatic purchases, Redis or fake evidence. Gemini receives extracted text
+only after separate consent.
 
 ## Run locally (no credentials)
 
@@ -297,6 +298,9 @@ human decisions do not require an AI model or API key.
 
 ## Gemini summary setup
 
+The same configuration also enables the on-demand reference explanations
+described below.
+
 Add your key to backend `.env` (never a `VITE_` variable), then explicitly enable:
 
 ```dotenv
@@ -358,6 +362,42 @@ reservation was not sent to Gemini. Durable
 quota counters and cumulative reservations survive document deletion. No
 automatic refunds or generation retries; an interrupted lease becomes an
 explicit failure rather than replaying an uncertain paid call.
+
+### Concise reference explanations
+
+The review workspace's right-hand panel offers **Explain with AI**. Clicking
+consents to sending only the selected finding's stored label and kind to Gemini,
+not the filename, surrounding document, sources or human review notes:
+
+```text
+POST /v1/documents/{id}/findings/{finding_id}/explanation
+     {"consent":true,"request_key":"unique-client-key"}
+```
+
+This synchronous endpoint requires ownership and the latest completed analysis.
+It returns the finding with `ai_explanation` (status, text/error, model, consent
+and completion timestamps, attempts, usage and reserved allowance). The response
+is general model knowledge, **not retrieved evidence or legal verification**.
+The prompt asks for 2-3 sentences; output is validated at no more than 80 words
+and 600 characters. Ambiguous references should request context, not invent a
+case holding or identify an Act from a bare section number.
+
+Labels over 600 characters are rejected without provider calls. Input counting
+enforces 2,048 tokens, and output is capped at 600 tokens including thinking.
+Explanations share the document-summary daily counters and cumulative allowance,
+but reserve against these smaller token limits. Completed responses are cached
+per finding; duplicate in-flight requests return 409, without duplicate calls.
+At most two explicit attempts per finding are allowed. Interrupted requests can
+be retried explicitly after 120 seconds; uncertain requests retain reservations.
+No automatic generation or retry occurs on selection, refresh or report viewing.
+
+State is saved in the existing finding JSON; no schema migration is needed.
+Explanations do not change verification metrics, source state or human decisions.
+New report snapshots include saved explanations with an unverified label;
+older snapshots remain unchanged. Explanations delete/expire with the document;
+shared aggregate quota reservations remain.
+
+### Document summary generation
 
 The worker sends a frozen paragraph/reference/source-excerpt packet to Google's
 official HTTPS API using `x-goog-api-key`, not query-string credentials. It first

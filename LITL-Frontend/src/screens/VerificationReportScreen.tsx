@@ -8,6 +8,7 @@ import { DocumentReadingText } from '@/components/workspace/DocumentReadingText'
 import { useResource } from '@/lib/documents'
 import { date, label, type Report } from '@/lib/api'
 import { AiSummaryContent } from '@/components/workspace/AiSummaryPanel'
+import { AiExplanationContent } from '@/components/workspace/AiExplanationPanel'
 import { googleReferenceFirstResultUrl, referenceUrl } from '@/lib/referenceLinks'
 
 function Snapshot({ documentId, reportId }: { documentId: string; reportId: string }) {
@@ -59,6 +60,7 @@ function Snapshot({ documentId, reportId }: { documentId: string; reportId: stri
         <p className="text-small">{label(finding.kind)} · {finding.page !== null ? `Page ${finding.page}` : finding.paragraph_id ? `Paragraph ${report.document.paragraphs.findIndex((p) => p.id === finding.paragraph_id) + 1}` : 'Document'} · Character offsets {finding.start}–{finding.end}</p>
         <blockquote className="whitespace-normal break-words rounded bg-cite-mark p-3">{finding.excerpt}</blockquote>
         <p><strong>Machine note:</strong> {finding.note}</p>
+        {finding.ai_explanation && <AiExplanationContent explanation={finding.ai_explanation} />}
         <p className="whitespace-pre-wrap break-words"><strong>Proposed correction:</strong> {finding.correction || 'None recorded'}</p>
         <p className="whitespace-pre-wrap break-words"><strong>Human note:</strong> {finding.review_note || 'None recorded'}</p>
         <p className="text-small text-slate">Saved review version {finding.version} · Source-open activity at snapshot: {finding.source_opened ? 'recorded' : 'not recorded'}</p>

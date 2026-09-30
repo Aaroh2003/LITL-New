@@ -30,7 +30,9 @@ export function useResource<T>(path: string, poll?: (value: T) => boolean) {
   return { data, setData, error, reload }
 }
 const active = (doc: Document) => ['queued', 'processing'].includes(doc.latest_run?.status || '') ||
-  ['queued', 'processing'].includes(doc.ai_summary?.status || '')
+  ['queued', 'processing'].includes(doc.ai_summary?.status || '') ||
+  doc.findings.some((finding) => finding.ai_explanation?.status === 'processing' &&
+    finding.ai_explanation.started_at * 1000 + 120000 > Date.now())
 type DocumentState = { doc: Document; reload: () => void; updateFinding: (finding: Finding) => void; updateRun: (run: Run) => void }
 const DocumentContext = createContext<DocumentState | null>(null)
 function DocumentLoader({ documentId }: { documentId: string }) {

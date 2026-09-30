@@ -50,11 +50,19 @@ service-role keys or source-provider secrets in frontend environment variables.*
   including PDFs with blank lines between individual words. Genuine prose
   paragraphs retain normal spacing instead of labels on each extracted line.
   Stored text, source locations and citation offsets are unchanged.
+  **Explain with AI** in the right-hand panel sends only the selected reference
+  to Gemini after a click. The saved explanation is at most 80 words / 600
+  characters, clearly marked unverified, and separate from source evidence and
+  human assessment. Loading/error/retry states are explicit; selecting another
+  reference never triggers a generation call. It shares the backend Gemini
+  budget and daily limits. A completed response is reused without another call.
 - `/documents/:id/reports`: immutable snapshot creation and history.
 - `/documents/:id/reports/:reportId`: snapshot-only data, JSON download and
   honestly labelled browser **Print / save PDF**. Original documents are not edited.
   Snapshot documents share the review workspace's continuous reading layout,
   including print/PDF output; stored snapshot text and JSON remain unchanged.
+  New snapshots include saved reference explanations; existing snapshots are
+  never rewritten when an explanation is generated later.
 - `/help`: scope, provider processing, retention and privacy limitations.
 
 Only public/synthetic/fully anonymized English Indian legal documents are

@@ -5,6 +5,7 @@ import { DecisionBadge, MachineBadge } from '@/components/ui/LiveData'
 import { WorkspaceLayout, WorkspaceSubHeader, WorkspaceFooterBar, EvidencePane } from '@/components/workspace/WorkspaceLayout'
 import { LiveDocumentPane } from '@/components/workspace/LiveDocumentPane'
 import { SourceLinks } from '@/components/workspace/SourceLinks'
+import { AiExplanationPanel } from '@/components/workspace/AiExplanationPanel'
 import { useDocument } from '@/lib/documents'
 import { useAuth } from '@/lib/auth'
 import { ApiError, errorMessage, label, type Decision, type Document, type Finding, type Source } from '@/lib/api'
@@ -87,6 +88,7 @@ function ReviewForm({ finding, setDirty }: { finding: Finding; setDirty: (dirty:
     <SourceLinks sources={finding.sources} searchQuery={finding.kind !== 'quotation' ? finding.label : undefined} candidates={finding.link_state === 'candidates'} emptyMessage={finding.evidence_message} draftQuote={finding.kind === 'quotation' ? finding.excerpt : undefined} onOpen={(source) => void openSource(source)} />
     <p className="text-small text-slate">Saved link activity: {finding.source_opened ? 'at least one source link opened' : 'no source open recorded'}.</p>
     {activityError && <p role="alert" className="notice error">{activityError} Open the link again to retry recording activity.</p>}
+    <AiExplanationPanel finding={finding} />
     <form onSubmit={save} className="stack border-t border-mist pt-5">
       <h3 className="type-h3">Your assessment</h3>
       <p className="text-small text-slate">A correction is a saved proposal, not an edit to the original PDF, DOCX or text.</p>
